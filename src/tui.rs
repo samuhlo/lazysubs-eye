@@ -1,4 +1,5 @@
 use crate::output::countdown;
+use crate::pi_tokens::{self, PiUsageRow};
 use crate::providers::{ProviderStatus, Status};
 use crate::tokens::{self, fmt_count, ModelTokens};
 use crate::{cache, providers};
@@ -29,15 +30,18 @@ pub fn run() -> Result<()> {
 enum Update {
     Status(Status),
     Tokens(Vec<ModelTokens>),
+    PiTokens(Vec<PiUsageRow>),
 }
 
 struct App {
     status: Option<Status>,
     tokens: Vec<ModelTokens>,
+    pi_tokens: Vec<PiUsageRow>,
     refreshing: bool,
     tx: mpsc::Sender<Update>,
     rx: mpsc::Receiver<Update>,
     tokens_scanning: bool,
+    pi_tokens_scanning: bool,
     last_refresh: Instant,
 }
 
@@ -47,10 +51,12 @@ impl App {
         Self {
             status: None,
             tokens: vec![],
+            pi_tokens: vec![],
             refreshing: false,
             tx,
             rx,
             tokens_scanning: false,
+            pi_tokens_scanning: false,
             last_refresh: Instant::now(),
         }
     }
@@ -81,6 +87,12 @@ impl App {
                 let _ = tx.send(Update::Tokens(tokens::claude_today()));
             });
         }
+        if self.begin_pi_token_scan() {
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(Update::PiTokens(pi_tokens::scan_pi_today()));
+            });
+        }
     }
 
     fn begin_token_scan(&mut self) -> bool {
@@ -91,20 +103,36 @@ impl App {
         true
     }
 
+    fn begin_pi_token_scan(&mut self) -> bool {
+        if self.pi_tokens_scanning {
+            return false;
+        }
+        self.pi_tokens_scanning = true;
+        true
+    }
+
+    fn apply_update(&mut self, update: Update) {
+        match update {
+            Update::Status(status) => {
+                self.status = Some(status);
+                self.refreshing = false;
+            }
+            Update::Tokens(tokens) => {
+                self.tokens = tokens;
+                self.tokens_scanning = false;
+            }
+            Update::PiTokens(tokens) => {
+                self.pi_tokens = tokens;
+                self.pi_tokens_scanning = false;
+            }
+        }
+    }
+
     fn run(mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         self.refresh(false);
         loop {
             while let Ok(update) = self.rx.try_recv() {
-                match update {
-                    Update::Status(status) => {
-                        self.status = Some(status);
-                        self.refreshing = false;
-                    }
-                    Update::Tokens(tokens) => {
-                        self.tokens = tokens;
-                        self.tokens_scanning = false;
-                    }
-                }
+                self.apply_update(update);
             }
             terminal.draw(|f| self.draw(f))?;
             if event::poll(Duration::from_millis(200))? {
@@ -142,6 +170,9 @@ impl App {
         if !self.tokens.is_empty() {
             constraints.push(Constraint::Length(self.tokens.len() as u16 + 3));
         }
+        if !self.pi_tokens.is_empty() {
+            constraints.push(Constraint::Length(pi_section_height(self.pi_tokens.len())));
+        }
         constraints.push(Constraint::Min(0)); // relleno
         constraints.push(Constraint::Length(1)); // pie
         let areas = Layout::vertical(constraints).split(f.area());
@@ -150,8 +181,13 @@ impl App {
         for (i, p) in status.providers.iter().enumerate() {
             draw_provider(f, areas[i + 1], p);
         }
+        let mut section = status.providers.len() + 1;
         if !self.tokens.is_empty() {
-            self.draw_tokens(f, areas[status.providers.len() + 1]);
+            self.draw_tokens(f, areas[section]);
+            section += 1;
+        }
+        if !self.pi_tokens.is_empty() {
+            self.draw_pi_tokens(f, areas[section]);
         }
         self.draw_footer(f, areas[areas.len() - 1], status);
     }
@@ -202,6 +238,45 @@ impl App {
         );
     }
 
+    fn draw_pi_tokens(&self, f: &mut Frame, area: Rect) {
+        let header = Row::new(vec![
+            "provider", "modelo", "in", "out", "cache→", "cache+", "total", "coste",
+        ])
+        .style(Style::new().fg(DIM).add_modifier(Modifier::BOLD));
+        let rows: Vec<Row> = self
+            .pi_tokens
+            .iter()
+            .map(|row| {
+                Row::new(vec![
+                    row.provider.clone(),
+                    row.model.clone(),
+                    fmt_count(row.totals.input),
+                    fmt_count(row.totals.output),
+                    fmt_count(row.totals.cache_read),
+                    fmt_count(row.totals.cache_write),
+                    fmt_count(row.totals.total_tokens),
+                    fmt_cost(row.totals.cost_total),
+                ])
+            })
+            .collect();
+        let widths = [
+            Constraint::Length(10),
+            Constraint::Fill(1),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(9),
+        ];
+        f.render_widget(
+            Table::new(rows, widths)
+                .header(header)
+                .block(bordered(" Pi hoy ").padding(Padding::horizontal(1))),
+            area,
+        );
+    }
+
     fn draw_footer(&self, f: &mut Frame, area: Rect, status: &Status) {
         let [left, right] =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(24)]).areas(area);
@@ -227,6 +302,15 @@ impl App {
             right,
         );
     }
+}
+
+fn pi_section_height(rows: usize) -> u16 {
+    rows.saturating_add(3).min(u16::MAX as usize) as u16
+}
+
+fn fmt_cost(cost: f64) -> String {
+    let value = format!("{cost:.4}");
+    value.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 fn codex_reset_credits_line(p: &ProviderStatus) -> Option<String> {
@@ -342,6 +426,7 @@ impl<'a> ParagraphExt<'a> for Paragraph<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pi_tokens::{PiUsageRow, PiUsageTotals};
     use crate::providers::Window;
 
     fn provider(id: &str, credits: Option<u64>, error: Option<&str>) -> ProviderStatus {
@@ -380,16 +465,7 @@ mod tests {
         };
         app.tx.send(Update::Status(status)).unwrap();
         while let Ok(update) = app.rx.try_recv() {
-            match update {
-                Update::Status(status) => {
-                    app.status = Some(status);
-                    app.refreshing = false;
-                }
-                Update::Tokens(tokens) => {
-                    app.tokens = tokens;
-                    app.tokens_scanning = false;
-                }
-            }
+            app.apply_update(update);
         }
         assert!(app.status.is_some());
         assert!(app.tokens_scanning);
@@ -397,10 +473,49 @@ mod tests {
     }
 
     #[test]
+    fn pi_state_independence() {
+        let mut app = App::new();
+        assert!(app.begin_pi_token_scan());
+        assert!(!app.begin_pi_token_scan());
+        app.pi_tokens_scanning = true;
+        app.tx
+            .send(Update::PiTokens(vec![PiUsageRow {
+                provider: "p".into(),
+                model: "m".into(),
+                totals: PiUsageTotals::default(),
+            }]))
+            .unwrap();
+        while let Ok(update) = app.rx.try_recv() {
+            app.apply_update(update);
+        }
+        assert!(!app.pi_tokens_scanning);
+        assert_eq!(app.pi_tokens.len(), 1);
+    }
+
+    #[test]
     fn prevents_duplicate_token_scans_while_one_is_active() {
         let mut app = App::new();
         assert!(app.begin_token_scan());
         assert!(!app.begin_token_scan());
+    }
+
+    #[test]
+    fn status_updates_apply_while_pi_scan_is_active() {
+        let mut app = App::new();
+        app.pi_tokens_scanning = true;
+        app.apply_update(Update::Status(Status {
+            fetched_at: 1,
+            providers: vec![],
+        }));
+        assert!(app.status.is_some());
+        assert!(app.pi_tokens_scanning);
+    }
+
+    #[test]
+    fn pi_render_helpers_keep_cost_neutral_and_height_independent() {
+        assert_eq!(pi_section_height(2), 5);
+        assert_eq!(fmt_cost(0.0), "0");
+        assert_eq!(fmt_cost(1234.56789), "1234.5679");
     }
 
     #[test]

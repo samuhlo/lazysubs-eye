@@ -1,5 +1,6 @@
 mod cache;
 mod output;
+mod pi_tokens;
 mod providers;
 mod tokens;
 mod tui;
@@ -21,7 +22,11 @@ Uso: lazysubs [tui|--json|--waybar] [--no-cache] [--ttl <segundos>]
 ";
 
 fn main() {
-    let mut mode = if std::io::stdout().is_terminal() { "tui" } else { "json" };
+    let mut mode = if std::io::stdout().is_terminal() {
+        "tui"
+    } else {
+        "json"
+    };
     let mut use_cache = true;
     let mut ttl = DEFAULT_TTL_SECS;
 
@@ -57,12 +62,7 @@ fn main() {
         return;
     }
 
-    let status = if use_cache {
-        cache::load(ttl)
-    } else {
-        None
-    }
-    .unwrap_or_else(|| {
+    let status = if use_cache { cache::load(ttl) } else { None }.unwrap_or_else(|| {
         let fresh = providers::collect_all();
         cache::save(&fresh);
         fresh

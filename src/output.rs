@@ -134,4 +134,17 @@ mod tests {
             waybar(&status(None, Some("falló")))
         );
     }
+
+    #[test]
+    fn json_and_waybar_contracts_remain_byte_stable_without_pi_data() {
+        let status = status(None, None);
+        assert_eq!(
+            pretty(&status),
+            "{\n  \"fetched_at\": 1,\n  \"providers\": [\n    {\n      \"id\": \"codex\",\n      \"name\": \"Codex\",\n      \"icon\": \"⬡\",\n      \"plan\": \"pro\",\n      \"windows\": [\n        {\n          \"label\": \"5h\",\n          \"used_percent\": 40.0,\n          \"resets_at\": null,\n          \"active\": true\n        }\n      ],\n      \"error\": null\n    }\n  ]\n}"
+        );
+        assert_eq!(
+            waybar(&status),
+            "{\"class\":\"normal\",\"percentage\":40,\"text\":\"⬡ 40%\",\"tooltip\":\"Codex (pro)\\n  5h                40%\"}"
+        );
+    }
 }
