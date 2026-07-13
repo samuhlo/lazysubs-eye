@@ -85,13 +85,18 @@ pub fn collect() -> Result<ProviderStatus> {
     }
 
     let resp = ureq::get(USAGE_URL)
-        .set("Authorization", &format!("Bearer {}", creds.oauth.access_token))
+        .set(
+            "Authorization",
+            &format!("Bearer {}", creds.oauth.access_token),
+        )
         .set("anthropic-beta", "oauth-2025-04-20")
         .call();
 
     let usage: UsageResponse = match resp {
         Ok(r) => r.into_json().context("parseando respuesta de usage")?,
-        Err(ureq::Error::Status(401, _)) => bail!("token rechazado — abre Claude Code para refrescarlo"),
+        Err(ureq::Error::Status(401, _)) => {
+            bail!("token rechazado — abre Claude Code para refrescarlo")
+        }
         Err(ureq::Error::Status(code, _)) => bail!("API respondió {code}"),
         Err(e) => return Err(e).context("llamando al endpoint de usage"),
     };
@@ -117,6 +122,7 @@ pub fn collect() -> Result<ProviderStatus> {
         icon: ICON.into(),
         plan: creds.oauth.subscription_type,
         windows,
+        reset_credits_available: None,
         error: None,
     })
 }

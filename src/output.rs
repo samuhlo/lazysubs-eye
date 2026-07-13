@@ -53,7 +53,10 @@ pub fn waybar(status: &Status) -> String {
                 .resets_at
                 .map(|t| format!("  → {}", countdown(t)))
                 .unwrap_or_default();
-            tooltip.push(format!("  {:<16} {:>3.0}%{}", w.label, w.used_percent, reset));
+            tooltip.push(format!(
+                "  {:<16} {:>3.0}%{}",
+                w.label, w.used_percent, reset
+            ));
         }
         tooltip.push(String::new());
     }
@@ -61,7 +64,11 @@ pub fn waybar(status: &Status) -> String {
     if parts.is_empty() {
         parts.push("sin providers".into());
     }
-    let class = if has_error { "error" } else { class_for(max_percent) };
+    let class = if has_error {
+        "error"
+    } else {
+        class_for(max_percent)
+    };
 
     json!({
         "text": parts.join("  "),
@@ -74,4 +81,57 @@ pub fn waybar(status: &Status) -> String {
 
 pub fn pretty(status: &Status) -> String {
     serde_json::to_string_pretty(status).unwrap_or_else(|_| "{}".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::{ProviderStatus, Window};
+
+    fn status(credits: Option<u64>, error: Option<&str>) -> Status {
+        Status {
+            fetched_at: 1,
+            providers: vec![ProviderStatus {
+                id: "codex".into(),
+                name: "Codex".into(),
+                icon: "⬡".into(),
+                plan: Some("pro".into()),
+                windows: vec![Window {
+                    label: "5h".into(),
+                    used_percent: 40.0,
+                    resets_at: None,
+                    active: true,
+                }],
+                reset_credits_available: credits,
+                error: error.map(str::to_owned),
+            }],
+        }
+    }
+
+    #[test]
+    fn pretty_serializes_reset_credits_only_when_present() {
+        for credits in [Some(3), Some(0)] {
+            let value: serde_json::Value =
+                serde_json::from_str(&pretty(&status(credits, None))).unwrap();
+            assert_eq!(
+                value["providers"][0]["reset_credits_available"],
+                serde_json::json!(credits)
+            );
+            assert_eq!(value["providers"][0]["id"], "codex");
+            assert_eq!(value["providers"][0]["windows"][0]["used_percent"], 40.0);
+        }
+        let value: serde_json::Value = serde_json::from_str(&pretty(&status(None, None))).unwrap();
+        assert!(value["providers"][0]
+            .get("reset_credits_available")
+            .is_none());
+    }
+
+    #[test]
+    fn waybar_ignores_reset_credits_in_normal_and_error_statuses() {
+        assert_eq!(waybar(&status(Some(3), None)), waybar(&status(None, None)));
+        assert_eq!(
+            waybar(&status(Some(0), Some("falló"))),
+            waybar(&status(None, Some("falló")))
+        );
+    }
 }

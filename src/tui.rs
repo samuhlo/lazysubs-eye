@@ -26,12 +26,18 @@ pub fn run() -> Result<()> {
     result
 }
 
+enum Update {
+    Status(Status),
+    Tokens(Vec<ModelTokens>),
+}
+
 struct App {
     status: Option<Status>,
     tokens: Vec<ModelTokens>,
     refreshing: bool,
-    tx: mpsc::Sender<(Status, Vec<ModelTokens>)>,
-    rx: mpsc::Receiver<(Status, Vec<ModelTokens>)>,
+    tx: mpsc::Sender<Update>,
+    rx: mpsc::Receiver<Update>,
+    tokens_scanning: bool,
     last_refresh: Instant,
 }
 
@@ -44,6 +50,7 @@ impl App {
             refreshing: false,
             tx,
             rx,
+            tokens_scanning: false,
             last_refresh: Instant::now(),
         }
     }
@@ -56,23 +63,48 @@ impl App {
         self.last_refresh = Instant::now();
         let tx = self.tx.clone();
         std::thread::spawn(move || {
-            let status = if force { None } else { cache::load(CACHE_TTL_SECS) }.unwrap_or_else(|| {
+            let status = if force {
+                None
+            } else {
+                cache::load(CACHE_TTL_SECS)
+            }
+            .unwrap_or_else(|| {
                 let fresh = providers::collect_all();
                 cache::save(&fresh);
                 fresh
             });
-            let toks = tokens::claude_today();
-            let _ = tx.send((status, toks));
+            let _ = tx.send(Update::Status(status));
         });
+        if self.begin_token_scan() {
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(Update::Tokens(tokens::claude_today()));
+            });
+        }
+    }
+
+    fn begin_token_scan(&mut self) -> bool {
+        if self.tokens_scanning {
+            return false;
+        }
+        self.tokens_scanning = true;
+        true
     }
 
     fn run(mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         self.refresh(false);
         loop {
-            while let Ok((status, toks)) = self.rx.try_recv() {
-                self.status = Some(status);
-                self.tokens = toks;
-                self.refreshing = false;
+            while let Ok(update) = self.rx.try_recv() {
+                match update {
+                    Update::Status(status) => {
+                        self.status = Some(status);
+                        self.refreshing = false;
+                    }
+                    Update::Tokens(tokens) => {
+                        self.tokens = tokens;
+                        self.tokens_scanning = false;
+                    }
+                }
             }
             terminal.draw(|f| self.draw(f))?;
             if event::poll(Duration::from_millis(200))? {
@@ -95,7 +127,9 @@ impl App {
     fn draw(&self, f: &mut Frame) {
         let Some(status) = &self.status else {
             f.render_widget(
-                Paragraph::new("cargando…").fg_dim().alignment(Alignment::Center),
+                Paragraph::new("cargando…")
+                    .fg_dim()
+                    .alignment(Alignment::Center),
                 f.area(),
             );
             return;
@@ -125,7 +159,10 @@ impl App {
     fn draw_header(&self, f: &mut Frame, area: Rect) {
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled(" lazysubs ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " lazysubs ",
+                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("· cuotas de IA", Style::new().fg(DIM)),
             ])),
             area,
@@ -166,7 +203,8 @@ impl App {
     }
 
     fn draw_footer(&self, f: &mut Frame, area: Rect, status: &Status) {
-        let [left, right] = Layout::horizontal([Constraint::Min(0), Constraint::Length(24)]).areas(area);
+        let [left, right] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(24)]).areas(area);
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(" q ", Style::new().fg(ACCENT)),
@@ -183,21 +221,33 @@ impl App {
             format!("hace {age}s ")
         };
         f.render_widget(
-            Paragraph::new(state).style(Style::new().fg(DIM)).alignment(Alignment::Right),
+            Paragraph::new(state)
+                .style(Style::new().fg(DIM))
+                .alignment(Alignment::Right),
             right,
         );
     }
 }
 
+fn codex_reset_credits_line(p: &ProviderStatus) -> Option<String> {
+    (p.id == "codex" && p.error.is_none())
+        .then_some(p.reset_credits_available)
+        .flatten()
+        .map(|credits| format!("Créditos de reinicio disponibles: {credits}"))
+}
+
 fn provider_height(p: &ProviderStatus) -> u16 {
-    p.windows.len().max(1) as u16 + 2
+    p.windows.len().max(1) as u16 + 2 + u16::from(codex_reset_credits_line(p).is_some())
 }
 
 fn bordered<'a>(title: impl Into<std::borrow::Cow<'a, str>>) -> Block<'a> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(DIM))
-        .title(Span::styled(title, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(
+            title,
+            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+        ))
 }
 
 fn percent_color(pct: f64) -> Color {
@@ -218,12 +268,21 @@ fn draw_provider(f: &mut Frame, area: Rect, p: &ProviderStatus) {
     f.render_widget(block, area);
 
     if let Some(err) = &p.error {
-        f.render_widget(Paragraph::new(err.as_str()).style(Style::new().fg(Color::Red)), inner);
+        f.render_widget(
+            Paragraph::new(err.as_str()).style(Style::new().fg(Color::Red)),
+            inner,
+        );
         return;
     }
 
-    let rows = Layout::vertical(vec![Constraint::Length(1); p.windows.len()]).split(inner);
-    for (row, w) in rows.iter().zip(&p.windows) {
+    let reset_credits_line = codex_reset_credits_line(p);
+    let window_rows = p.windows.len().max(1);
+    let mut constraints = vec![Constraint::Length(1); window_rows];
+    if reset_credits_line.is_some() {
+        constraints.push(Constraint::Length(1));
+    }
+    let rows = Layout::vertical(constraints).split(inner);
+    for (row, w) in rows.iter().take(window_rows).zip(&p.windows) {
         let [label_a, gauge_a, reset_a] = Layout::horizontal([
             Constraint::Length(18),
             Constraint::Min(10),
@@ -236,7 +295,10 @@ fn draw_provider(f: &mut Frame, area: Rect, p: &ProviderStatus) {
         } else {
             Style::new().fg(DIM)
         };
-        f.render_widget(Paragraph::new(format!(" {}", w.label)).style(label_style), label_a);
+        f.render_widget(
+            Paragraph::new(format!(" {}", w.label)).style(label_style),
+            label_a,
+        );
 
         f.render_widget(
             LineGauge::default()
@@ -248,10 +310,22 @@ fn draw_provider(f: &mut Frame, area: Rect, p: &ProviderStatus) {
             gauge_a,
         );
 
-        let reset = w.resets_at.map(|t| format!("→ {} ", countdown(t))).unwrap_or_default();
+        let reset = w
+            .resets_at
+            .map(|t| format!("→ {} ", countdown(t)))
+            .unwrap_or_default();
         f.render_widget(
-            Paragraph::new(reset).style(Style::new().fg(DIM)).alignment(Alignment::Right),
+            Paragraph::new(reset)
+                .style(Style::new().fg(DIM))
+                .alignment(Alignment::Right),
             reset_a,
+        );
+    }
+
+    if let Some(line) = reset_credits_line {
+        f.render_widget(
+            Paragraph::new(line).style(Style::new().fg(DIM)),
+            rows[window_rows],
         );
     }
 }
@@ -262,5 +336,109 @@ trait ParagraphExt<'a> {
 impl<'a> ParagraphExt<'a> for Paragraph<'a> {
     fn fg_dim(self) -> Paragraph<'a> {
         self.style(Style::new().fg(DIM))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::Window;
+
+    fn provider(id: &str, credits: Option<u64>, error: Option<&str>) -> ProviderStatus {
+        ProviderStatus {
+            id: id.into(),
+            name: "Provider".into(),
+            icon: "*".into(),
+            plan: None,
+            windows: vec![
+                Window {
+                    label: "5h".into(),
+                    used_percent: 10.0,
+                    resets_at: None,
+                    active: true,
+                },
+                Window {
+                    label: "semana".into(),
+                    used_percent: 20.0,
+                    resets_at: None,
+                    active: true,
+                },
+            ],
+            reset_credits_available: credits,
+            error: error.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn status_updates_are_applied_while_tokens_are_scanning() {
+        let mut app = App::new();
+        app.refreshing = true;
+        app.tokens_scanning = true;
+        let status = Status {
+            fetched_at: 1,
+            providers: vec![],
+        };
+        app.tx.send(Update::Status(status)).unwrap();
+        while let Ok(update) = app.rx.try_recv() {
+            match update {
+                Update::Status(status) => {
+                    app.status = Some(status);
+                    app.refreshing = false;
+                }
+                Update::Tokens(tokens) => {
+                    app.tokens = tokens;
+                    app.tokens_scanning = false;
+                }
+            }
+        }
+        assert!(app.status.is_some());
+        assert!(app.tokens_scanning);
+        assert!(!app.refreshing);
+    }
+
+    #[test]
+    fn prevents_duplicate_token_scans_while_one_is_active() {
+        let mut app = App::new();
+        assert!(app.begin_token_scan());
+        assert!(!app.begin_token_scan());
+    }
+
+    #[test]
+    fn shows_reset_credits_for_healthy_codex_only() {
+        let codex = provider("codex", Some(3), None);
+        assert_eq!(
+            codex_reset_credits_line(&codex).as_deref(),
+            Some("Créditos de reinicio disponibles: 3")
+        );
+
+        let zero = provider("codex", Some(0), None);
+        assert_eq!(
+            codex_reset_credits_line(&zero).as_deref(),
+            Some("Créditos de reinicio disponibles: 0")
+        );
+        assert_eq!(
+            codex_reset_credits_line(&provider("codex", None, None)),
+            None
+        );
+        assert_eq!(
+            codex_reset_credits_line(&provider("claude", Some(3), None)),
+            None
+        );
+        assert_eq!(
+            codex_reset_credits_line(&provider("codex", Some(3), Some("falló"))),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_height_uses_the_same_reset_credit_condition() {
+        assert_eq!(provider_height(&provider("codex", Some(3), None)), 5);
+        assert_eq!(provider_height(&provider("codex", Some(0), None)), 5);
+        assert_eq!(provider_height(&provider("codex", None, None)), 4);
+        assert_eq!(provider_height(&provider("claude", Some(3), None)), 4);
+        assert_eq!(
+            provider_height(&provider("codex", Some(3), Some("falló"))),
+            4
+        );
     }
 }
