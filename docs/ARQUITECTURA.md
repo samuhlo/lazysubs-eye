@@ -105,9 +105,21 @@ para probar contra un directorio sandbox).
 `ProviderStatus { id, name, icon, plan, windows: Vec<Window>, error }`
 `Window { label, used_percent, resets_at: Option<unix_secs>, active }`
 
-Un provider se incluye solo si `available()` detecta sus credenciales
+Un provider se incluye solo si se detectan sus credenciales
 (`~/.claude/.credentials.json` / `~/.codex/auth.json`). Si el collector falla,
 se devuelve un `ProviderStatus` con `error` — nunca rompe el output completo.
+
+**Multicuenta (E2 paso 2)**: `collect_all` resuelve, por provider, una lista de
+cuentas desde `[[accounts.claude|codex|minimax]]` de la config (o una sola
+autodetectada si no hay ninguna). Cada cuenta produce su `ProviderStatus` con id
+compuesto: la primera/única conserva el id simple (`"claude"`) para no romper las
+listas de superficie ni el estado de notificaciones (que son por id); las demás
+usan `"claude:<alias>"` y nombre `"Claude Code · <alias>"`. Los collectors están
+parametrizados: `claude::collect(creds_path)` (el email solo se autodetecta para
+la cuenta primaria, `~/.claude.json` es único), `codex::collect(codex_home)`
+(se pasa como `CODEX_HOME` al spawn del app-server) y
+`minimax::collect(api_key, base_url)`. `configured_providers()` da la lista de
+ids/nombres para construir dinámicamente las filas de providers del panel `o`.
 
 ## Fuentes de datos (verificadas en vivo, no re-derivar)
 

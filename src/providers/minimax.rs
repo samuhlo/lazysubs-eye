@@ -23,17 +23,15 @@ pub const ICON: &str = "◆";
 const DEFAULT_BASE_URL: &str = "https://api.minimax.io";
 const STATUS_NOT_IN_PLAN: i64 = 3;
 
-fn api_key() -> Option<String> {
+/// Key de la cuenta primaria (azúcar `[minimax] api_key` o `MINIMAX_API_KEY`).
+/// La multicuenta pasa la key directamente a `collect`.
+pub fn primary_api_key() -> Option<String> {
     crate::config::get()
         .minimax
         .api_key
         .clone()
         .or_else(|| std::env::var("MINIMAX_API_KEY").ok())
         .filter(|k| !k.trim().is_empty())
-}
-
-pub fn available() -> bool {
-    api_key().is_some()
 }
 
 #[derive(Deserialize)]
@@ -115,13 +113,11 @@ fn windows_from(remains: &[ModelRemains]) -> Vec<Window> {
     windows
 }
 
-pub fn collect() -> Result<ProviderStatus> {
-    let key = api_key().context("falta la api_key de MiniMax")?;
-    let base_url = crate::config::get()
-        .minimax
-        .base_url
-        .clone()
-        .unwrap_or_else(|| DEFAULT_BASE_URL.into());
+pub fn collect(key: &str, base_url: Option<&str>) -> Result<ProviderStatus> {
+    if key.trim().is_empty() {
+        bail!("falta la api_key de MiniMax");
+    }
+    let base_url = base_url.unwrap_or(DEFAULT_BASE_URL);
 
     let resp = ureq::get(&format!("{base_url}/v1/token_plan/remains"))
         .set("Authorization", &format!("Bearer {key}"))

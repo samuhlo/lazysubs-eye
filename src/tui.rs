@@ -120,11 +120,14 @@ fn settings_items() -> Vec<Setting> {
         Setting::Section("providers"),
     ];
     items.extend((0..PROVIDERS.len()).map(Setting::Provider));
+    // Las filas de visibilidad por superficie salen de las cuentas
+    // configuradas (incluye ids compuestos como "claude:trabajo").
+    let surface = surface_providers().len();
     items.push(Setting::Section("waybar"));
     items.push(Setting::WaybarPercent);
-    items.extend((0..PROVIDERS.len()).map(Setting::WaybarProvider));
+    items.extend((0..surface).map(Setting::WaybarProvider));
     items.push(Setting::Section("tui"));
-    items.extend((0..PROVIDERS.len()).map(Setting::TuiProvider));
+    items.extend((0..surface).map(Setting::TuiProvider));
     items.extend((0..PANELS.len()).map(Setting::TuiPanel));
     items.push(Setting::Section("historial"));
     items.push(Setting::StatsEnabled);
@@ -132,6 +135,11 @@ fn settings_items() -> Vec<Setting> {
     items.push(Setting::StatsHistoryDays);
     items.push(Setting::StatsSparkline);
     items
+}
+
+/// Providers por cuenta (id, nombre) para las filas de visibilidad del panel.
+fn surface_providers() -> Vec<(String, String)> {
+    providers::configured_providers()
 }
 
 fn in_list(list: &Option<Vec<String>>, id: &str) -> bool {
@@ -237,13 +245,15 @@ impl App {
                 *flag = !*flag;
             }
             Setting::WaybarPercent => config.waybar.percent = Some(!config.waybar.percent()),
-            Setting::WaybarProvider(i) => crate::config::toggle_id(
-                &mut config.waybar.providers,
-                &PROVIDER_IDS,
-                PROVIDER_IDS[i],
-            ),
+            Setting::WaybarProvider(i) => {
+                let surface = surface_providers();
+                let all: Vec<&str> = surface.iter().map(|(id, _)| id.as_str()).collect();
+                crate::config::toggle_id(&mut config.waybar.providers, &all, &surface[i].0)
+            }
             Setting::TuiProvider(i) => {
-                crate::config::toggle_id(&mut config.tui.providers, &PROVIDER_IDS, PROVIDER_IDS[i])
+                let surface = surface_providers();
+                let all: Vec<&str> = surface.iter().map(|(id, _)| id.as_str()).collect();
+                crate::config::toggle_id(&mut config.tui.providers, &all, &surface[i].0)
             }
             Setting::TuiPanel(i) => {
                 crate::config::toggle_id(&mut config.tui.panels, &PANEL_IDS, PANEL_IDS[i])
@@ -947,14 +957,20 @@ fn setting_row(item: &Setting, config: &crate::config::Config) -> (String, Strin
             "porcentaje en la barra".into(),
             check(config.waybar.percent()),
         ),
-        Setting::WaybarProvider(i) => (
-            PROVIDERS[*i].1.into(),
-            check(in_list(&config.waybar.providers, PROVIDER_IDS[*i])),
-        ),
-        Setting::TuiProvider(i) => (
-            PROVIDERS[*i].1.into(),
-            check(in_list(&config.tui.providers, PROVIDER_IDS[*i])),
-        ),
+        Setting::WaybarProvider(i) => {
+            let surface = surface_providers();
+            match surface.get(*i) {
+                Some((id, name)) => (name.clone(), check(in_list(&config.waybar.providers, id))),
+                None => (String::new(), String::new()),
+            }
+        }
+        Setting::TuiProvider(i) => {
+            let surface = surface_providers();
+            match surface.get(*i) {
+                Some((id, name)) => (name.clone(), check(in_list(&config.tui.providers, id))),
+                None => (String::new(), String::new()),
+            }
+        }
         Setting::TuiPanel(i) => (
             PANELS[*i].1.into(),
             check(in_list(&config.tui.panels, PANEL_IDS[*i])),

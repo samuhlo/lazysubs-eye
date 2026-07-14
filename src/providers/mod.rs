@@ -110,44 +110,230 @@ pub fn select<'a>(
     }
 }
 
+/// Una cuenta ya resuelta lista para colectar (id/nombre compuestos + icono).
+#[derive(Debug, Clone, PartialEq)]
+struct AccountSpec {
+    id: String,
+    name: String,
+    icon_override: Option<String>,
+}
+
+/// Compone id y nombre. La primera/única cuenta conserva el id simple
+/// ("claude") para no romper las listas de superficie ni las notificaciones,
+/// que son por id; las siguientes usan `base:alias`.
+fn compose(
+    base_id: &str,
+    base_name: &str,
+    len: usize,
+    index: usize,
+    alias: &str,
+) -> (String, String) {
+    if len <= 1 {
+        (base_id.to_string(), base_name.to_string())
+    } else if index == 0 {
+        (base_id.to_string(), format!("{base_name} · {alias}"))
+    } else {
+        (
+            format!("{base_id}:{alias}"),
+            format!("{base_name} · {alias}"),
+        )
+    }
+}
+
+fn apply_spec(
+    ps: &mut ProviderStatus,
+    spec: &AccountSpec,
+    base: &str,
+    config: &crate::config::Config,
+) {
+    ps.id = spec.id.clone();
+    ps.name = spec.name.clone();
+    let icon = spec.icon_override.as_ref().or(match base {
+        "claude" => config.icons.claude.as_ref(),
+        "codex" => config.icons.codex.as_ref(),
+        "minimax" => config.icons.minimax.as_ref(),
+        _ => None,
+    });
+    if let Some(icon) = icon {
+        ps.icon = icon.clone();
+    }
+}
+
+fn claude_targets(config: &crate::config::Config) -> Vec<(AccountSpec, std::path::PathBuf)> {
+    let accounts = &config.accounts.claude;
+    if accounts.is_empty() {
+        let (id, name) = compose("claude", "Claude Code", 1, 0, "");
+        return vec![(
+            AccountSpec {
+                id,
+                name,
+                icon_override: None,
+            },
+            claude::default_creds_path(),
+        )];
+    }
+    let len = accounts.len();
+    accounts
+        .iter()
+        .enumerate()
+        .map(|(i, acc)| {
+            let (id, name) = compose("claude", "Claude Code", len, i, &acc.name);
+            let creds = acc
+                .credentials
+                .as_deref()
+                .map(crate::config::expand_tilde)
+                .unwrap_or_else(claude::default_creds_path);
+            (
+                AccountSpec {
+                    id,
+                    name,
+                    icon_override: acc.icon.clone(),
+                },
+                creds,
+            )
+        })
+        .collect()
+}
+
+fn codex_targets(config: &crate::config::Config) -> Vec<(AccountSpec, Option<std::path::PathBuf>)> {
+    let accounts = &config.accounts.codex;
+    if accounts.is_empty() {
+        let (id, name) = compose("codex", "Codex", 1, 0, "");
+        return vec![(
+            AccountSpec {
+                id,
+                name,
+                icon_override: None,
+            },
+            None,
+        )];
+    }
+    let len = accounts.len();
+    accounts
+        .iter()
+        .enumerate()
+        .map(|(i, acc)| {
+            let (id, name) = compose("codex", "Codex", len, i, &acc.name);
+            let home = acc.codex_home.as_deref().map(crate::config::expand_tilde);
+            (
+                AccountSpec {
+                    id,
+                    name,
+                    icon_override: acc.icon.clone(),
+                },
+                home,
+            )
+        })
+        .collect()
+}
+
+fn minimax_targets(config: &crate::config::Config) -> Vec<(AccountSpec, String, Option<String>)> {
+    let accounts = &config.accounts.minimax;
+    if accounts.is_empty() {
+        // Azúcar de una sola cuenta: [minimax] api_key / MINIMAX_API_KEY.
+        return match minimax::primary_api_key() {
+            Some(key) => {
+                let (id, name) = compose("minimax", "MiniMax", 1, 0, "");
+                vec![(
+                    AccountSpec {
+                        id,
+                        name,
+                        icon_override: None,
+                    },
+                    key,
+                    config.minimax.base_url.clone(),
+                )]
+            }
+            None => vec![],
+        };
+    }
+    let len = accounts.len();
+    accounts
+        .iter()
+        .enumerate()
+        .map(|(i, acc)| {
+            let (id, name) = compose("minimax", "MiniMax", len, i, &acc.name);
+            (
+                AccountSpec {
+                    id,
+                    name,
+                    icon_override: acc.icon.clone(),
+                },
+                acc.api_key.clone().unwrap_or_default(),
+                acc.base_url.clone(),
+            )
+        })
+        .collect()
+}
+
+/// Ids y nombres cortos de las cuentas configuradas, para construir las filas
+/// de providers del panel de opciones de la TUI (independiente de que estén
+/// disponibles en disco). Respeta los toggles `[providers]`.
+pub fn configured_providers() -> Vec<(String, String)> {
+    let config = crate::config::get();
+    let mut out = Vec::new();
+    if config.providers.claude {
+        out.extend(
+            claude_targets(&config)
+                .into_iter()
+                .map(|(s, _)| (s.id, s.name)),
+        );
+    }
+    if config.providers.codex {
+        out.extend(
+            codex_targets(&config)
+                .into_iter()
+                .map(|(s, _)| (s.id, s.name)),
+        );
+    }
+    if config.providers.minimax {
+        out.extend(
+            minimax_targets(&config)
+                .into_iter()
+                .map(|(s, _, _)| (s.id, s.name)),
+        );
+    }
+    out
+}
+
 pub fn collect_all() -> Status {
     let config = crate::config::get();
     let mut providers = Vec::new();
 
-    if config.providers.claude && claude::available() {
-        providers.push(
-            claude::collect()
-                .unwrap_or_else(|e| ProviderStatus::err("claude", "Claude Code", claude::ICON, e)),
-        );
+    if config.providers.claude {
+        for (spec, creds) in claude_targets(&config) {
+            if !claude::available_at(&creds) {
+                continue;
+            }
+            let mut ps = claude::collect(&creds)
+                .unwrap_or_else(|e| ProviderStatus::err(&spec.id, &spec.name, claude::ICON, e));
+            apply_spec(&mut ps, &spec, "claude", &config);
+            providers.push(ps);
+        }
     }
-    if config.providers.codex && codex::available() {
-        providers.push(
-            codex::collect()
-                .unwrap_or_else(|e| ProviderStatus::err("codex", "Codex", codex::ICON, e)),
-        );
+    if config.providers.codex {
+        for (spec, home) in codex_targets(&config) {
+            if !codex::available_at(home.as_deref()) {
+                continue;
+            }
+            let mut ps = codex::collect(home.as_deref())
+                .unwrap_or_else(|e| ProviderStatus::err(&spec.id, &spec.name, codex::ICON, e));
+            apply_spec(&mut ps, &spec, "codex", &config);
+            providers.push(ps);
+        }
     }
-    if config.providers.minimax && minimax::available() {
-        providers.push(
-            minimax::collect()
-                .unwrap_or_else(|e| ProviderStatus::err("minimax", "MiniMax", minimax::ICON, e)),
-        );
+    if config.providers.minimax {
+        for (spec, key, base_url) in minimax_targets(&config) {
+            let mut ps = minimax::collect(&key, base_url.as_deref())
+                .unwrap_or_else(|e| ProviderStatus::err(&spec.id, &spec.name, minimax::ICON, e));
+            apply_spec(&mut ps, &spec, "minimax", &config);
+            providers.push(ps);
+        }
     }
 
     if providers.iter().any(|p| p.error.is_some()) {
         if let Some(previous) = crate::cache::load_stale() {
             keep_stale_data(&mut providers, &previous, chrono::Utc::now().timestamp());
-        }
-    }
-
-    for provider in &mut providers {
-        let icon = match provider.id.as_str() {
-            "claude" => config.icons.claude.as_ref(),
-            "codex" => config.icons.codex.as_ref(),
-            "minimax" => config.icons.minimax.as_ref(),
-            _ => None,
-        };
-        if let Some(icon) = icon {
-            provider.icon = icon.clone();
         }
     }
 
@@ -183,6 +369,73 @@ mod tests {
             stale_since: None,
             error: error.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn compose_conserva_id_simple_para_la_primera_o_unica() {
+        assert_eq!(
+            compose("claude", "Claude Code", 1, 0, "x"),
+            ("claude".to_string(), "Claude Code".to_string())
+        );
+        assert_eq!(
+            compose("claude", "Claude Code", 2, 0, "personal"),
+            ("claude".to_string(), "Claude Code · personal".to_string())
+        );
+        assert_eq!(
+            compose("claude", "Claude Code", 2, 1, "trabajo"),
+            (
+                "claude:trabajo".to_string(),
+                "Claude Code · trabajo".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn claude_targets_default_y_multicuenta() {
+        use crate::config::{ClaudeAccount, Config};
+
+        // sin accounts → una cuenta, id simple, creds por defecto
+        let default = Config::default();
+        let targets = claude_targets(&default);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].0.id, "claude");
+        assert_eq!(targets[0].1, claude::default_creds_path());
+
+        // dos cuentas → ids claude y claude:trabajo, creds expandidos
+        let mut config = Config::default();
+        config.accounts.claude = vec![
+            ClaudeAccount {
+                name: "personal".into(),
+                credentials: None,
+                icon: None,
+            },
+            ClaudeAccount {
+                name: "trabajo".into(),
+                credentials: Some("/tmp/w/.credentials.json".into()),
+                icon: Some("❄".into()),
+            },
+        ];
+        let targets = claude_targets(&config);
+        assert_eq!(targets.len(), 2);
+        assert_eq!(targets[0].0.id, "claude");
+        assert_eq!(targets[0].1, claude::default_creds_path());
+        assert_eq!(targets[1].0.id, "claude:trabajo");
+        assert_eq!(targets[1].0.name, "Claude Code · trabajo");
+        assert_eq!(targets[1].0.icon_override.as_deref(), Some("❄"));
+        assert_eq!(
+            targets[1].1,
+            std::path::PathBuf::from("/tmp/w/.credentials.json")
+        );
+    }
+
+    #[test]
+    fn minimax_targets_vacio_sin_key() {
+        use crate::config::Config;
+        let mut config = Config::default();
+        // sin api_key ni accounts → sin targets (env puede tener MINIMAX_API_KEY)
+        std::env::remove_var("MINIMAX_API_KEY");
+        config.minimax.api_key = None;
+        assert!(minimax_targets(&config).is_empty());
     }
 
     #[test]

@@ -2,7 +2,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -13,13 +13,20 @@ pub const ICON: &str = "⬡";
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
-fn auth_path() -> PathBuf {
+fn default_codex_home() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".codex/auth.json")
+    PathBuf::from(home).join(".codex")
 }
 
-pub fn available() -> bool {
-    auth_path().exists()
+/// Directorio efectivo de Codex (config o el default `~/.codex`).
+fn codex_home(codex_home: Option<&Path>) -> PathBuf {
+    codex_home
+        .map(Path::to_path_buf)
+        .unwrap_or_else(default_codex_home)
+}
+
+pub fn available_at(home: Option<&Path>) -> bool {
+    codex_home(home).join("auth.json").exists()
 }
 
 #[derive(Deserialize)]
@@ -146,14 +153,18 @@ fn rate_limits_result_from_response(msg: &serde_json::Value) -> Result<Option<se
     ))
 }
 
-pub fn collect() -> Result<ProviderStatus> {
-    let mut child = Command::new("codex")
+pub fn collect(home: Option<&Path>) -> Result<ProviderStatus> {
+    let mut command = Command::new("codex");
+    command
         .arg("app-server")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("lanzando codex app-server")?;
+        .stderr(Stdio::null());
+    // El app-server respeta CODEX_HOME para elegir la cuenta/credenciales.
+    if let Some(home) = home {
+        command.env("CODEX_HOME", home);
+    }
+    let mut child = command.spawn().context("lanzando codex app-server")?;
 
     let mut stdin = child.stdin.take().context("sin stdin")?;
     let stdout = child.stdout.take().context("sin stdout")?;

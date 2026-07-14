@@ -104,9 +104,19 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
   `parse_account` testado). Codex/MiniMax sin autodetección (JWT no decodificable
   / API sin identidad) → alias de config en el paso 2. UI: email junto al plan en
   TUI (truncado) y tooltip de waybar. Config `show_account` (default true) con las
-  tres patas. **94 tests**. Release v0.9.0. **Pendiente E2 paso 2**: multicuenta
-  (`[[accounts.*]]`, collectors parametrizados, ids compuestos, providers
-  dinámicos en el panel `o`).
+  tres patas. **94 tests**. Release v0.9.0.
+- **Fase E2 paso 2 — multicuenta** ✓ (2026-07-14): config
+  `[[accounts.claude|codex|minimax]]` (name/credentials/codex_home/api_key/icon,
+  `expand_tilde`), collectors parametrizados (`claude::collect(creds)`,
+  `codex::collect(codex_home)` vía `CODEX_HOME`, `minimax::collect(key, base_url)`),
+  `collect_all` resuelve N cuentas por provider con ids compuestos
+  (`claude:trabajo`; la primera/única conserva `claude`), icono y nombre por
+  cuenta, y `configured_providers()` alimenta filas dinámicas en el panel `o`.
+  Sin `[[accounts.*]]` → comportamiento idéntico (verificado byte a byte en la
+  salida por defecto). Verificado en vivo con una segunda cuenta Claude de
+  credenciales falsas que degrada a error sin romper el output. **100 tests**.
+  Cierra E2. Release v0.10.0. **Codex**: el email solo vive en el JWT (el
+  guardarraíl no deja decodificarlo) → sin autodetección, alias de config.
 - **Post-lanzamiento (2026-07-14, feedback del usuario)** ✓: fix del texto
   truncado "sin uso hoy" en el panel OpenCode (era una celda de tabla con
   columna de 10 chars; ahora es párrafo), degradación con datos previos ante

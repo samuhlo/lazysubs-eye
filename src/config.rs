@@ -37,6 +37,57 @@ pub struct Config {
     pub waybar: Waybar,
     pub tui: Tui,
     pub stats: Stats,
+    pub accounts: Accounts,
+}
+
+/// Multicuenta por IA. Vacío = una cuenta autodetectada por provider (el
+/// comportamiento de siempre). Con entradas, cada una produce su propio
+/// `ProviderStatus`; ver `providers::collect_all`.
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Accounts {
+    pub claude: Vec<ClaudeAccount>,
+    pub codex: Vec<CodexAccount>,
+    pub minimax: Vec<MiniMaxAccount>,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ClaudeAccount {
+    /// Alias visible (se compone en el id `claude:<name>` y en el nombre).
+    pub name: String,
+    /// Ruta del `.credentials.json`; por defecto `~/.claude/.credentials.json`.
+    pub credentials: Option<String>,
+    pub icon: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CodexAccount {
+    pub name: String,
+    /// Directorio que se pasa como `CODEX_HOME` al app-server; por defecto
+    /// `~/.codex`.
+    pub codex_home: Option<String>,
+    pub icon: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MiniMaxAccount {
+    pub name: String,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub icon: Option<String>,
+}
+
+/// Expande un `~` inicial usando `$HOME`. Rutas sin tilde se devuelven tal cual.
+pub fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(path)
 }
 
 /// Historial de gasto de tokens (SQLite en XDG_STATE_HOME) y sus estadísticas.
@@ -143,6 +194,7 @@ impl Default for Config {
             waybar: Waybar::default(),
             tui: Tui::default(),
             stats: Stats::default(),
+            accounts: Accounts::default(),
         }
     }
 }
@@ -481,6 +533,65 @@ api_key = \"sk-secreta\"  # no tocar
         let mut doc: DocumentMut = "notifications = false\n".parse().unwrap();
         apply_to_doc(&mut doc, &Config::default());
         assert!(doc.to_string().contains("notifications = true"));
+    }
+
+    #[test]
+    fn accounts_multicuenta_se_parsean() {
+        let config: Config = toml::from_str(
+            r#"
+[[accounts.claude]]
+name = "personal"
+
+[[accounts.claude]]
+name = "trabajo"
+credentials = "~/trabajo/.claude/.credentials.json"
+icon = "❄"
+
+[[accounts.codex]]
+name = "personal"
+codex_home = "~/.codex"
+
+[[accounts.minimax]]
+name = "personal"
+api_key = "sk-x"
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.accounts.claude.len(), 2);
+        assert_eq!(config.accounts.claude[0].name, "personal");
+        assert_eq!(config.accounts.claude[0].credentials, None);
+        assert_eq!(
+            config.accounts.claude[1].credentials.as_deref(),
+            Some("~/trabajo/.claude/.credentials.json")
+        );
+        assert_eq!(config.accounts.claude[1].icon.as_deref(), Some("❄"));
+        assert_eq!(config.accounts.codex.len(), 1);
+        assert_eq!(
+            config.accounts.codex[0].codex_home.as_deref(),
+            Some("~/.codex")
+        );
+        assert_eq!(config.accounts.minimax[0].api_key.as_deref(), Some("sk-x"));
+
+        // sin tabla → vacío (comportamiento de siempre)
+        let default: Config = toml::from_str("").unwrap();
+        assert!(default.accounts.claude.is_empty());
+        assert!(default.accounts.codex.is_empty());
+        assert!(default.accounts.minimax.is_empty());
+    }
+
+    #[test]
+    fn expand_tilde_usa_home() {
+        std::env::set_var("HOME", "/home/tester");
+        assert_eq!(expand_tilde("~/x/y"), PathBuf::from("/home/tester/x/y"));
+        assert_eq!(expand_tilde("/abs/path"), PathBuf::from("/abs/path"));
+        assert_eq!(expand_tilde("rel"), PathBuf::from("rel"));
+    }
+
+    #[test]
+    fn account_con_clave_desconocida_es_error() {
+        assert!(
+            toml::from_str::<Config>("[[accounts.claude]]\nname = \"x\"\nbogus = 1\n").is_err()
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use super::{ProviderStatus, Window};
 
@@ -8,13 +8,13 @@ pub const ICON: &str = "✳";
 
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 
-fn creds_path() -> PathBuf {
+pub fn default_creds_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     PathBuf::from(home).join(".claude/.credentials.json")
 }
 
-pub fn available() -> bool {
-    creds_path().exists()
+pub fn available_at(creds: &Path) -> bool {
+    creds.exists()
 }
 
 #[derive(Deserialize)]
@@ -129,9 +129,14 @@ fn label_for(l: &Limit) -> String {
 
 /// Claude Code refreshes this token itself; never attempt a refresh here or
 /// we would invalidate the CLI's refresh token. On 401 just surface "reauth".
-pub fn collect() -> Result<ProviderStatus> {
-    let raw = std::fs::read_to_string(creds_path()).context("leyendo credenciales")?;
+pub fn collect(creds_path: &Path) -> Result<ProviderStatus> {
+    let raw = std::fs::read_to_string(creds_path).context("leyendo credenciales")?;
     let creds: CredsFile = serde_json::from_str(&raw).context("parseando credenciales")?;
+    // El email solo es fiable para la cuenta primaria (~/.claude.json es único);
+    // para credenciales de otra cuenta no lo autodetectamos (va el alias).
+    let account = (creds_path == default_creds_path())
+        .then(account_identity)
+        .flatten();
 
     if creds.oauth.expires_at / 1000 < chrono::Utc::now().timestamp() {
         bail!("token caducado — abre Claude Code para refrescarlo");
@@ -174,7 +179,7 @@ pub fn collect() -> Result<ProviderStatus> {
         name: "Claude Code".into(),
         icon: ICON.into(),
         plan: creds.oauth.subscription_type,
-        account: account_identity(),
+        account,
         windows,
         reset_credits_available: None,
         stale_since: None,

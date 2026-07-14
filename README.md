@@ -95,7 +95,8 @@ notification_cooldown = 1800 # min seconds between repeat notifications for
 colors = true        # false: no threshold coloring anywhere (the waybar
                      # `error` class stays — it signals breakage, not usage)
 show_account = true  # show the account (email/alias) next to the plan in the
-                     # TUI and the waybar tooltip; false hides it
+                     # TUI and the waybar tooltip; false hides it (Claude's
+                     # email is read from ~/.claude.json, identity only)
 
 [providers]          # disable a provider entirely (it isn't even queried)
 claude = true
@@ -130,6 +131,36 @@ api_key = "..."      # or the MINIMAX_API_KEY env var
 per surface — e.g. keep the bar minimal with one provider while the TUI shows
 everything. Hidden providers don't drive the bar's CSS class either. `[tui]
 panels` toggles the daily-token panels (disabled panels aren't even scanned).
+
+### Multiple accounts
+
+By default each provider is a single auto-detected account. To watch more than
+one account of the same AI (e.g. two Claude logins), declare them under
+`[[accounts.<provider>]]`:
+
+```toml
+[[accounts.claude]]
+name = "personal"                            # first/only account keeps id "claude"
+[[accounts.claude]]
+name = "work"                                # becomes id "claude:work"
+credentials = "~/work/.claude/.credentials.json"
+icon = "❄"                                   # optional per-account icon
+
+[[accounts.codex]]
+name = "personal"
+codex_home = "~/.codex"                       # passed as CODEX_HOME to the app-server
+
+[[accounts.minimax]]
+name = "personal"
+api_key = "..."                               # per-account key (or use [minimax] for one)
+```
+
+Each account becomes its own provider with a composite id (`claude:work`) and a
+name like `Claude Code · work`. The first/only account keeps the plain id
+(`claude`) so existing `providers` lists and notification state keep working;
+those lists accept composite ids too. Without any `[[accounts.*]]` the behaviour
+is unchanged. The account rows in the `o` panel (waybar/tui visibility) are built
+from your configured accounts.
 
 ### In-TUI settings
 

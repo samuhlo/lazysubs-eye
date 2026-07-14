@@ -100,6 +100,12 @@ verificado contra los datos reales del usuario.
 
 ## Fase E2 — Cuenta visible y multicuenta por IA
 
+> **✓ Implementada el 2026-07-14.** Paso 1 (cuenta visible, v0.9.0): Claude
+> autodetecta el email de `~/.claude.json`; Codex/MiniMax usan alias de config.
+> Paso 2 (multicuenta, v0.10.0): `[[accounts.*]]`, collectors parametrizados,
+> ids compuestos `claude:trabajo`, providers dinámicos en el panel `o`.
+> Verificado en vivo (segunda cuenta Claude que degrada a error sin romper).
+
 ### Objetivo
 
 Mostrar qué cuenta y plan se usa en cada provider, y soportar varias cuentas
