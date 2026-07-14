@@ -1,3 +1,4 @@
+use crate::history::{self, Period};
 use crate::opencode_tokens::{
     self, OpenCodePanelState, OpenCodeUnavailableReason, OpenCodeUsageRow,
 };
@@ -12,8 +13,11 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, LineGauge, Padding, Paragraph, Row, Table};
+use ratatui::widgets::{
+    Block, BorderType, Clear, LineGauge, Padding, Paragraph, Row, Sparkline, Table,
+};
 use ratatui::Frame;
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -34,6 +38,8 @@ enum Update {
     Tokens(Vec<ModelTokens>),
     PiTokens(Vec<PiUsageRow>),
     OpenCodeTokens(OpenCodePanelState),
+    /// El backfill del historial terminó; toca recargar los agregados.
+    Backfilled,
 }
 
 struct App {
@@ -48,6 +54,12 @@ struct App {
     pi_tokens_scanning: bool,
     opencode_scanning: bool,
     last_refresh: Instant,
+    /// Periodo de los paneles de tokens (hoy/semana/mes).
+    period: Period,
+    /// Agregados del historial por fuente para el periodo actual.
+    history_rows: HashMap<&'static str, Vec<history::UsageRow>>,
+    /// Serie diaria (sparkline) por fuente.
+    history_spark: HashMap<&'static str, Vec<u64>>,
     /// Cursor del panel de opciones; None = cerrado.
     settings_cursor: Option<usize>,
     settings_error: Option<String>,
@@ -68,6 +80,10 @@ enum Setting {
     WaybarProvider(usize),
     TuiProvider(usize),
     TuiPanel(usize),
+    StatsEnabled,
+    StatsPeriod,
+    StatsHistoryDays,
+    StatsSparkline,
 }
 
 const PROVIDERS: [(&str, &str); 3] = [
@@ -82,6 +98,13 @@ const PANELS: [(&str, &str); 3] = [
 ];
 const PROVIDER_IDS: [&str; 3] = ["claude", "codex", "minimax"];
 const PANEL_IDS: [&str; 3] = ["claude_tokens", "pi_tokens", "opencode_tokens"];
+
+/// Fuente de historial de cada panel de tokens (mismo orden que PANEL_IDS).
+const PANEL_SOURCES: [&str; 3] = [
+    history::SOURCE_CLAUDE,
+    history::SOURCE_PI,
+    history::SOURCE_OPENCODE,
+];
 
 fn settings_items() -> Vec<Setting> {
     let mut items = vec![
@@ -101,6 +124,11 @@ fn settings_items() -> Vec<Setting> {
     items.push(Setting::Section("tui"));
     items.extend((0..PROVIDERS.len()).map(Setting::TuiProvider));
     items.extend((0..PANELS.len()).map(Setting::TuiPanel));
+    items.push(Setting::Section("historial"));
+    items.push(Setting::StatsEnabled);
+    items.push(Setting::StatsPeriod);
+    items.push(Setting::StatsHistoryDays);
+    items.push(Setting::StatsSparkline);
     items
 }
 
@@ -114,6 +142,12 @@ fn in_list(list: &Option<Vec<String>>, id: &str) -> bool {
 impl App {
     fn new() -> Self {
         let (tx, rx) = mpsc::channel();
+        let config = crate::config::get();
+        let period = if config.stats.enabled {
+            Period::parse(&config.stats.default_period)
+        } else {
+            Period::Today
+        };
         Self {
             status: None,
             tokens: vec![],
@@ -126,8 +160,31 @@ impl App {
             pi_tokens_scanning: false,
             opencode_scanning: false,
             last_refresh: Instant::now(),
+            period,
+            history_rows: HashMap::new(),
+            history_spark: HashMap::new(),
             settings_cursor: None,
             settings_error: None,
+        }
+    }
+
+    /// Recarga los agregados del historial (filas del periodo + sparkline) de
+    /// una fuente. Barato: consultas SQLite indexadas.
+    fn reload_source_history(&mut self, source: &'static str) {
+        if !crate::config::get().stats.enabled {
+            self.history_rows.remove(source);
+            self.history_spark.remove(source);
+            return;
+        }
+        self.history_rows
+            .insert(source, history::period_rows(source, self.period));
+        self.history_spark
+            .insert(source, history::sparkline(source));
+    }
+
+    fn reload_history(&mut self) {
+        for source in history::SOURCES {
+            self.reload_source_history(source);
         }
     }
 
@@ -188,6 +245,16 @@ impl App {
             Setting::TuiPanel(i) => {
                 crate::config::toggle_id(&mut config.tui.panels, &PANEL_IDS, PANEL_IDS[i])
             }
+            Setting::StatsEnabled => config.stats.enabled = !config.stats.enabled,
+            Setting::StatsSparkline => config.stats.sparkline = !config.stats.sparkline,
+            Setting::StatsPeriod if dir != 0 => {
+                let period = Period::parse(&config.stats.default_period).next();
+                config.stats.default_period = period.label().to_string();
+            }
+            Setting::StatsHistoryDays if dir != 0 => {
+                config.stats.history_days = (config.stats.history_days + 30 * dir).clamp(0, 3650)
+            }
+            Setting::StatsPeriod | Setting::StatsHistoryDays => return,
         }
         crate::config::set(config.clone());
         self.settings_error = crate::config::persist(&config)
@@ -197,6 +264,31 @@ impl App {
         if matches!(items[cursor], Setting::TuiPanel(_)) {
             self.refresh(false);
         }
+        // Cambios que afectan al historial: sincronizar periodo y recargar.
+        match items[cursor] {
+            Setting::StatsPeriod => {
+                self.period = Period::parse(&config.stats.default_period);
+                self.reload_history();
+            }
+            Setting::StatsEnabled => {
+                if config.stats.enabled {
+                    self.spawn_backfill();
+                }
+                self.reload_history();
+            }
+            Setting::StatsSparkline => self.reload_history(),
+            _ => {}
+        }
+    }
+
+    /// Lanza el backfill del historial en segundo plano (una sola vez de por
+    /// vida); al terminar avisa para recargar los agregados.
+    fn spawn_backfill(&self) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            history::maybe_backfill();
+            let _ = tx.send(Update::Backfilled);
+        });
     }
 
     fn refresh(&mut self, force: bool) {
@@ -276,10 +368,17 @@ impl App {
             Update::Tokens(tokens) => {
                 self.tokens = tokens;
                 self.tokens_scanning = false;
+                history::record_source(
+                    history::SOURCE_CLAUDE,
+                    &history::rows_from_claude(&self.tokens),
+                );
+                self.reload_source_history(history::SOURCE_CLAUDE);
             }
             Update::PiTokens(tokens) => {
                 self.pi_tokens = tokens;
                 self.pi_tokens_scanning = false;
+                history::record_source(history::SOURCE_PI, &history::rows_from_pi(&self.pi_tokens));
+                self.reload_source_history(history::SOURCE_PI);
             }
             Update::OpenCodeTokens(tokens) => {
                 self.opencode_tokens = match (self.opencode_tokens.clone(), tokens) {
@@ -291,12 +390,28 @@ impl App {
                     (_, state) => state,
                 };
                 self.opencode_scanning = false;
+                // Solo se ingiere cuando hay datos reales (no en fallos: eso
+                // sobrescribiría el día con cero y perdería lo ya registrado).
+                if let OpenCodePanelState::Ready(rows) | OpenCodePanelState::Stale { rows, .. } =
+                    &self.opencode_tokens
+                {
+                    history::record_source(
+                        history::SOURCE_OPENCODE,
+                        &history::rows_from_opencode(rows),
+                    );
+                }
+                self.reload_source_history(history::SOURCE_OPENCODE);
             }
+            Update::Backfilled => self.reload_history(),
         }
     }
 
     fn run(mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         self.refresh(false);
+        if crate::config::get().stats.enabled {
+            self.spawn_backfill();
+            self.reload_history();
+        }
         loop {
             while let Ok(update) = self.rx.try_recv() {
                 self.apply_update(update);
@@ -322,6 +437,12 @@ impl App {
                                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                                 KeyCode::Char('r') => self.refresh(true),
                                 KeyCode::Char('o') => self.settings_cursor = Some(1),
+                                KeyCode::Char('t') | KeyCode::Tab
+                                    if crate::config::get().stats.enabled =>
+                                {
+                                    self.period = self.period.next();
+                                    self.reload_history();
+                                }
                                 _ => {}
                             }
                         }
@@ -347,24 +468,16 @@ impl App {
 
         let tui_config = &crate::config::get().tui;
         let providers = providers::select(&status.providers, &tui_config.providers);
-        let show_tokens = tui_config.panel("claude_tokens") && !self.tokens.is_empty();
-        let show_pi = tui_config.panel("pi_tokens") && !self.pi_tokens.is_empty();
-        let show_opencode = tui_config.panel("opencode_tokens");
+        let panels: Vec<usize> = (0..PANELS.len())
+            .filter(|&idx| self.token_panel_shown(idx, tui_config))
+            .collect();
 
         let mut constraints = vec![Constraint::Length(1)]; // cabecera
         for p in &providers {
             constraints.push(Constraint::Length(provider_height(p)));
         }
-        if show_tokens {
-            constraints.push(Constraint::Length(self.tokens.len() as u16 + 3));
-        }
-        if show_pi {
-            constraints.push(Constraint::Length(pi_section_height(self.pi_tokens.len())));
-        }
-        if show_opencode {
-            constraints.push(Constraint::Length(opencode_section_height(
-                &self.opencode_tokens,
-            )));
+        for &idx in &panels {
+            constraints.push(Constraint::Length(self.token_panel_height(idx)));
         }
         constraints.push(Constraint::Min(0)); // relleno
         constraints.push(Constraint::Length(1)); // pie
@@ -374,17 +487,8 @@ impl App {
         for (i, p) in providers.iter().enumerate() {
             draw_provider(f, areas[i + 1], p);
         }
-        let mut section = providers.len() + 1;
-        if show_tokens {
-            self.draw_tokens(f, areas[section]);
-            section += 1;
-        }
-        if show_pi {
-            self.draw_pi_tokens(f, areas[section]);
-            section += 1;
-        }
-        if show_opencode {
-            self.draw_opencode_tokens(f, areas[section]);
+        for (section, &idx) in (providers.len() + 1..).zip(panels.iter()) {
+            self.draw_token_panel(f, areas[section], idx);
         }
         self.draw_footer(f, areas[areas.len() - 1], status);
         if self.settings_cursor.is_some() {
@@ -457,145 +561,245 @@ impl App {
         );
     }
 
-    fn draw_tokens(&self, f: &mut Frame, area: Rect) {
-        let header = Row::new(vec!["modelo", "req", "in", "out", "cache→", "cache+"])
-            .style(Style::new().fg(DIM).add_modifier(Modifier::BOLD));
-        let rows: Vec<Row> = self
-            .tokens
-            .iter()
-            .map(|m| {
-                Row::new(vec![
-                    m.model.clone(),
-                    fmt_count(m.requests),
-                    fmt_count(m.input),
-                    fmt_count(m.output),
-                    fmt_count(m.cache_read),
-                    fmt_count(m.cache_creation),
-                ])
-            })
-            .collect();
-        let widths = [
-            Constraint::Fill(1),
-            Constraint::Length(6),
-            Constraint::Length(8),
-            Constraint::Length(8),
-            Constraint::Length(8),
-            Constraint::Length(8),
-        ];
-        f.render_widget(
-            Table::new(rows, widths)
-                .header(header)
-                .block(bordered(" ✳ tokens hoy ").padding(Padding::horizontal(1))),
-            area,
-        );
+    /// Un panel de tokens se muestra si su panel está activo y, en "hoy", si
+    /// tiene datos que enseñar (en semana/mes siempre, con "sin datos" si toca).
+    fn token_panel_shown(&self, idx: usize, tui: &crate::config::Tui) -> bool {
+        if !tui.panel(PANEL_IDS[idx]) {
+            return false;
+        }
+        if self.period != Period::Today {
+            return true;
+        }
+        match idx {
+            0 => !self.tokens.is_empty(),
+            1 => !self.pi_tokens.is_empty(),
+            _ => true, // opencode siempre pinta (estado o tabla)
+        }
     }
 
-    fn draw_pi_tokens(&self, f: &mut Frame, area: Rect) {
-        let header = Row::new(vec![
-            "provider", "modelo", "in", "out", "cache→", "cache+", "total", "coste",
-        ])
-        .style(Style::new().fg(DIM).add_modifier(Modifier::BOLD));
-        let rows: Vec<Row> = self
-            .pi_tokens
-            .iter()
-            .map(|row| {
-                Row::new(vec![
-                    row.provider.clone(),
-                    row.model.clone(),
-                    fmt_count(row.totals.input),
-                    fmt_count(row.totals.output),
-                    fmt_count(row.totals.cache_read),
-                    fmt_count(row.totals.cache_write),
-                    fmt_count(row.totals.total_tokens),
-                    fmt_cost(row.totals.cost_total),
-                ])
-            })
-            .collect();
-        let widths = [
-            Constraint::Length(10),
-            Constraint::Fill(1),
-            Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Length(8),
-            Constraint::Length(8),
-            Constraint::Length(8),
-            Constraint::Length(9),
-        ];
-        f.render_widget(
-            Table::new(rows, widths)
-                .header(header)
-                .block(bordered(" Pi hoy ").padding(Padding::horizontal(1))),
-            area,
-        );
+    /// Nº de filas de cuerpo (cabecera + datos, o el mensaje de estado).
+    fn body_lines(&self, idx: usize) -> u16 {
+        if self.period != Period::Today {
+            let rows = self
+                .history_rows
+                .get(PANEL_SOURCES[idx])
+                .map(|r| r.len())
+                .unwrap_or(0);
+            return 1 + rows.max(1) as u16; // cabecera + al menos una fila/mensaje
+        }
+        match idx {
+            0 => 1 + self.tokens.len() as u16,
+            1 => 1 + self.pi_tokens.len() as u16,
+            _ => match &self.opencode_tokens {
+                OpenCodePanelState::Ready(rows) | OpenCodePanelState::Stale { rows, .. } => {
+                    1 + rows.len() as u16
+                }
+                _ => 1, // mensaje de estado, sin cabecera
+            },
+        }
     }
 
-    fn draw_opencode_tokens(&self, f: &mut Frame, area: Rect) {
-        let header = Row::new(vec![
-            "provider", "modelo", "in", "out", "raz", "cache→", "cache+", "total", "coste",
-        ])
-        .style(Style::new().fg(DIM).add_modifier(Modifier::BOLD));
-        let title = match &self.opencode_tokens {
-            OpenCodePanelState::Stale { reason, .. } => {
-                format!(" OpenCode hoy · {} ", unavailable_text(*reason))
+    /// Serie del sparkline si hay datos con algún valor positivo.
+    fn panel_spark(&self, idx: usize) -> Option<&Vec<u64>> {
+        self.history_spark
+            .get(PANEL_SOURCES[idx])
+            .filter(|s| s.iter().any(|&v| v > 0))
+    }
+
+    fn token_panel_height(&self, idx: usize) -> u16 {
+        let spark = u16::from(self.panel_spark(idx).is_some());
+        self.body_lines(idx) + 2 + spark
+    }
+
+    fn panel_title(&self, idx: usize) -> String {
+        const BASES: [&str; 3] = ["✳ tokens", "Pi", "OpenCode"];
+        let base = BASES[idx];
+        // Nota de datos rancios solo en el panel OpenCode de hoy.
+        if idx == 2 && self.period == Period::Today {
+            if let OpenCodePanelState::Stale { reason, .. } = &self.opencode_tokens {
+                return format!(" {base} hoy · {} ", unavailable_text(*reason));
             }
-            _ => " OpenCode hoy ".into(),
+        }
+        format!(" {base} {} ", self.period.label())
+    }
+
+    fn draw_token_panel(&self, f: &mut Frame, area: Rect, idx: usize) {
+        let block = bordered(self.panel_title(idx)).padding(Padding::horizontal(1));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let (body, spark_area) = match self.panel_spark(idx) {
+            Some(_) => {
+                let [b, s] =
+                    Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+                (b, Some(s))
+            }
+            None => (inner, None),
         };
-        // Los estados sin datos van como párrafo, no como fila: las celdas de
-        // la tabla truncan el texto al ancho de la primera columna.
-        let message = match &self.opencode_tokens {
-            OpenCodePanelState::Ready(_) | OpenCodePanelState::Stale { .. } => None,
-            OpenCodePanelState::Loading => Some("leyendo OpenCode…"),
-            OpenCodePanelState::Empty => Some("sin uso hoy"),
-            OpenCodePanelState::Unavailable(reason) => Some(unavailable_text(*reason)),
-        };
-        if let Some(message) = message {
+
+        if self.period == Period::Today {
+            self.draw_today_body(f, body, idx);
+        } else {
+            self.draw_history_body(f, body, PANEL_SOURCES[idx]);
+        }
+
+        if let (Some(area), Some(series)) = (spark_area, self.panel_spark(idx)) {
             f.render_widget(
-                Paragraph::new(message)
-                    .style(Style::new().fg(DIM))
-                    .block(bordered(title).padding(Padding::horizontal(1))),
+                Sparkline::default()
+                    .data(series.as_slice())
+                    .style(Style::new().fg(if crate::config::get().colors {
+                        ACCENT
+                    } else {
+                        Color::Reset
+                    })),
+                area,
+            );
+        }
+    }
+
+    fn draw_today_body(&self, f: &mut Frame, area: Rect, idx: usize) {
+        match idx {
+            0 => {
+                let header = Row::new(vec!["modelo", "req", "in", "out", "cache→", "cache+"])
+                    .style(Style::new().fg(DIM).add_modifier(Modifier::BOLD));
+                let rows: Vec<Row> = self
+                    .tokens
+                    .iter()
+                    .map(|m| {
+                        Row::new(vec![
+                            m.model.clone(),
+                            fmt_count(m.requests),
+                            fmt_count(m.input),
+                            fmt_count(m.output),
+                            fmt_count(m.cache_read),
+                            fmt_count(m.cache_creation),
+                        ])
+                    })
+                    .collect();
+                let widths = [
+                    Constraint::Fill(1),
+                    Constraint::Length(6),
+                    Constraint::Length(8),
+                    Constraint::Length(8),
+                    Constraint::Length(8),
+                    Constraint::Length(8),
+                ];
+                f.render_widget(Table::new(rows, widths).header(header), area);
+            }
+            1 => {
+                let header = Row::new(vec![
+                    "provider", "modelo", "in", "out", "cache→", "cache+", "total", "coste",
+                ])
+                .style(Style::new().fg(DIM).add_modifier(Modifier::BOLD));
+                let rows: Vec<Row> = self
+                    .pi_tokens
+                    .iter()
+                    .map(|row| {
+                        Row::new(vec![
+                            row.provider.clone(),
+                            row.model.clone(),
+                            fmt_count(row.totals.input),
+                            fmt_count(row.totals.output),
+                            fmt_count(row.totals.cache_read),
+                            fmt_count(row.totals.cache_write),
+                            fmt_count(row.totals.total_tokens),
+                            fmt_cost(row.totals.cost_total),
+                        ])
+                    })
+                    .collect();
+                f.render_widget(Table::new(rows, pi_widths()).header(header), area);
+            }
+            _ => {
+                let message = match &self.opencode_tokens {
+                    OpenCodePanelState::Ready(_) | OpenCodePanelState::Stale { .. } => None,
+                    OpenCodePanelState::Loading => Some("leyendo OpenCode…"),
+                    OpenCodePanelState::Empty => Some("sin uso hoy"),
+                    OpenCodePanelState::Unavailable(reason) => Some(unavailable_text(*reason)),
+                };
+                if let Some(message) = message {
+                    f.render_widget(Paragraph::new(message).style(Style::new().fg(DIM)), area);
+                    return;
+                }
+                let header = Row::new(vec![
+                    "provider", "modelo", "in", "out", "raz", "cache→", "cache+", "total", "coste",
+                ])
+                .style(Style::new().fg(DIM).add_modifier(Modifier::BOLD));
+                let rows: Vec<Row> = match &self.opencode_tokens {
+                    OpenCodePanelState::Ready(rows) | OpenCodePanelState::Stale { rows, .. } => {
+                        rows.iter().map(opencode_table_row).collect()
+                    }
+                    _ => unreachable!("estados sin datos ya renderizados como párrafo"),
+                };
+                f.render_widget(Table::new(rows, opencode_widths()).header(header), area);
+            }
+        }
+    }
+
+    /// Tabla agregada del historial (semana/mes) para una fuente: una fila por
+    /// (provider, modelo) con totales y coste del periodo.
+    fn draw_history_body(&self, f: &mut Frame, area: Rect, source: &'static str) {
+        let rows = self.history_rows.get(source);
+        if rows.map(|r| r.is_empty()).unwrap_or(true) {
+            f.render_widget(
+                Paragraph::new("sin datos del periodo").style(Style::new().fg(DIM)),
                 area,
             );
             return;
         }
-        let rows: Vec<Row> = match &self.opencode_tokens {
-            OpenCodePanelState::Ready(rows) | OpenCodePanelState::Stale { rows, .. } => {
-                rows.iter().map(opencode_table_row).collect()
-            }
-            _ => unreachable!("estados sin datos ya renderizados como párrafo"),
-        };
+        let header = Row::new(vec![
+            "provider", "modelo", "in", "out", "cache", "total", "coste",
+        ])
+        .style(Style::new().fg(DIM).add_modifier(Modifier::BOLD));
+        let table_rows: Vec<Row> = rows
+            .unwrap()
+            .iter()
+            .map(|r| {
+                Row::new(vec![
+                    r.provider.clone(),
+                    r.model.clone(),
+                    fmt_count(r.input),
+                    fmt_count(r.output),
+                    fmt_count(r.cache_read + r.cache_write),
+                    fmt_count(r.total),
+                    if r.cost > 0.0 {
+                        fmt_cost(r.cost)
+                    } else {
+                        "—".into()
+                    },
+                ])
+            })
+            .collect();
         let widths = [
             Constraint::Length(10),
             Constraint::Fill(1),
-            Constraint::Length(7),
-            Constraint::Length(7),
-            Constraint::Length(7),
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(9),
+            Constraint::Length(9),
         ];
-        f.render_widget(
-            Table::new(rows, widths)
-                .header(header)
-                .block(bordered(title).padding(Padding::horizontal(1))),
-            area,
-        );
+        f.render_widget(Table::new(table_rows, widths).header(header), area);
     }
 
     fn draw_footer(&self, f: &mut Frame, area: Rect, status: &Status) {
         let [left, right] =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(24)]).areas(area);
-        f.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled(" q ", Style::new().fg(ACCENT)),
-                Span::styled("salir  ", Style::new().fg(DIM)),
-                Span::styled("r ", Style::new().fg(ACCENT)),
-                Span::styled("refrescar  ", Style::new().fg(DIM)),
-                Span::styled("o ", Style::new().fg(ACCENT)),
-                Span::styled("opciones", Style::new().fg(DIM)),
-            ])),
-            left,
-        );
+        let mut spans = vec![
+            Span::styled(" q ", Style::new().fg(ACCENT)),
+            Span::styled("salir  ", Style::new().fg(DIM)),
+            Span::styled("r ", Style::new().fg(ACCENT)),
+            Span::styled("refrescar  ", Style::new().fg(DIM)),
+            Span::styled("o ", Style::new().fg(ACCENT)),
+            Span::styled("opciones", Style::new().fg(DIM)),
+        ];
+        if crate::config::get().stats.enabled {
+            spans.push(Span::styled("  t ", Style::new().fg(ACCENT)));
+            spans.push(Span::styled(
+                format!("periodo · {}", self.period.label()),
+                Style::new().fg(DIM),
+            ));
+        }
+        f.render_widget(Paragraph::new(Line::from(spans)), left);
         let state = if self.refreshing {
             "actualizando…".to_string()
         } else {
@@ -611,17 +815,31 @@ impl App {
     }
 }
 
-fn pi_section_height(rows: usize) -> u16 {
-    rows.saturating_add(3).min(u16::MAX as usize) as u16
+fn pi_widths() -> [Constraint; 8] {
+    [
+        Constraint::Length(10),
+        Constraint::Fill(1),
+        Constraint::Length(7),
+        Constraint::Length(7),
+        Constraint::Length(8),
+        Constraint::Length(8),
+        Constraint::Length(8),
+        Constraint::Length(9),
+    ]
 }
 
-fn opencode_section_height(state: &OpenCodePanelState) -> u16 {
-    match state {
-        OpenCodePanelState::Ready(rows) | OpenCodePanelState::Stale { rows, .. } => {
-            pi_section_height(rows.len())
-        }
-        _ => 4,
-    }
+fn opencode_widths() -> [Constraint; 9] {
+    [
+        Constraint::Length(10),
+        Constraint::Fill(1),
+        Constraint::Length(7),
+        Constraint::Length(7),
+        Constraint::Length(7),
+        Constraint::Length(8),
+        Constraint::Length(8),
+        Constraint::Length(8),
+        Constraint::Length(9),
+    ]
 }
 
 fn opencode_table_row(row: &OpenCodeUsageRow) -> Row<'static> {
@@ -726,6 +944,20 @@ fn setting_row(item: &Setting, config: &crate::config::Config) -> (String, Strin
             PANELS[*i].1.into(),
             check(in_list(&config.tui.panels, PANEL_IDS[*i])),
         ),
+        Setting::StatsEnabled => ("historial de gasto".into(), check(config.stats.enabled)),
+        Setting::StatsPeriod => (
+            "periodo inicial".into(),
+            format!("◂{:>6}▸", config.stats.default_period),
+        ),
+        Setting::StatsHistoryDays => (
+            "retención (días)".into(),
+            if config.stats.history_days == 0 {
+                "◂   ∞▸".into()
+            } else {
+                format!("◂{:>4}▸", config.stats.history_days)
+            },
+        ),
+        Setting::StatsSparkline => ("sparkline".into(), check(config.stats.sparkline)),
     }
 }
 
@@ -963,8 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn pi_render_helpers_keep_cost_neutral_and_height_independent() {
-        assert_eq!(pi_section_height(2), 5);
+    fn fmt_cost_es_neutral_y_recorta_ceros() {
         assert_eq!(fmt_cost(0.0), "0");
         assert_eq!(fmt_cost(1234.56789), "1234.5679");
     }

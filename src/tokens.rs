@@ -129,6 +129,78 @@ pub fn claude_today() -> Vec<ModelTokens> {
     models
 }
 
+/// Tokens por modelo agrupados por día local, de todos los JSONL de Claude
+/// (sin filtro de mtime ni índice incremental). Para el backfill del historial
+/// la primera vez; es un escaneo completo one-shot.
+pub fn claude_by_day() -> Vec<(String, Vec<ModelTokens>)> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let projects = PathBuf::from(home).join(".claude/projects");
+    let mut by_day: HashMap<String, HashMap<String, ModelTokens>> = HashMap::new();
+
+    let Ok(dirs) = std::fs::read_dir(&projects) else {
+        return vec![];
+    };
+    for dir in dirs.flatten() {
+        let Ok(files) = std::fs::read_dir(dir.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let Ok(f) = std::fs::File::open(&path) else {
+                continue;
+            };
+            for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+                let Ok(entry) = serde_json::from_str::<Entry>(&line) else {
+                    continue;
+                };
+                if entry.kind != "assistant" {
+                    continue;
+                }
+                let Some(date) = entry
+                    .timestamp
+                    .as_deref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Local).date_naive().to_string())
+                else {
+                    continue;
+                };
+                let Some(msg) = entry.message else { continue };
+                let (Some(model), Some(usage)) = (msg.model, msg.usage) else {
+                    continue;
+                };
+                if model.starts_with('<') {
+                    continue;
+                }
+                let agg = by_day
+                    .entry(date)
+                    .or_default()
+                    .entry(model.clone())
+                    .or_insert_with(|| ModelTokens {
+                        model,
+                        ..Default::default()
+                    });
+                agg.requests += 1;
+                agg.input += usage.input_tokens;
+                agg.output += usage.output_tokens;
+                agg.cache_read += usage.cache_read_input_tokens;
+                agg.cache_creation += usage.cache_creation_input_tokens;
+            }
+        }
+    }
+
+    by_day
+        .into_iter()
+        .map(|(date, models)| {
+            let mut rows: Vec<_> = models.into_values().collect();
+            rows.sort_by_key(|m| std::cmp::Reverse(m.total()));
+            (date, rows)
+        })
+        .collect()
+}
+
 pub fn fmt_count(n: u64) -> String {
     match n {
         0..=999 => n.to_string(),

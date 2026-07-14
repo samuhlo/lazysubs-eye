@@ -18,6 +18,12 @@ en el PKGBUILD, y actualizar el binario del usuario
 
 ## Fase E1 — Historial de gasto: semana / mes / estadísticas
 
+> **✓ Implementada el 2026-07-14.** Módulo `src/history.rs` (SQLite en
+> `~/.local/state/lazysubs-eye/history.db`), backfill one-shot de las tres
+> fuentes, ingesta desde main y la TUI, tecla `t`/Tab para ciclar
+> hoy/semana/mes, sparkline de 14 días, config `[stats]` y retención. Verificado
+> en vivo. Lo de abajo es el diseño original que se siguió.
+
 ### Objetivo
 
 Gasto de tokens (y coste donde exista) por semana y mes, por provider y

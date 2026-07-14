@@ -34,6 +34,32 @@ pub struct Config {
     pub minimax: MiniMax,
     pub waybar: Waybar,
     pub tui: Tui,
+    pub stats: Stats,
+}
+
+/// Historial de gasto de tokens (SQLite en XDG_STATE_HOME) y sus estadísticas.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Stats {
+    /// En false no se abre la base ni se pintan paneles de periodo (como antes).
+    pub enabled: bool,
+    /// Periodo inicial de los paneles de tokens: "hoy" | "semana" | "mes".
+    pub default_period: String,
+    /// Retención en días; 0 = sin límite.
+    pub history_days: i64,
+    /// Sparkline con el total diario bajo cada panel.
+    pub sparkline: bool,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_period: "hoy".into(),
+            history_days: 90,
+            sparkline: true,
+        }
+    }
 }
 
 /// Qué pinta el módulo de waybar.
@@ -113,6 +139,7 @@ impl Default for Config {
             minimax: MiniMax::default(),
             waybar: Waybar::default(),
             tui: Tui::default(),
+            stats: Stats::default(),
         }
     }
 }
@@ -278,6 +305,17 @@ fn apply_to_doc(doc: &mut DocumentMut, config: &Config) {
     }
     set_list(doc, "tui", "providers", &config.tui.providers);
     set_list(doc, "tui", "panels", &config.tui.panels);
+
+    let stats = &config.stats;
+    let stats_defaults = Stats::default();
+    let stats_differs = stats != &stats_defaults;
+    if stats_differs || doc.contains_key("stats") {
+        let table = ensure_table(doc, "stats");
+        table["enabled"] = value(stats.enabled);
+        table["default_period"] = value(stats.default_period.as_str());
+        table["history_days"] = value(stats.history_days);
+        table["sparkline"] = value(stats.sparkline);
+    }
 }
 
 /// Tabla explícita (`[nombre]` al final del fichero), nunca inline: toml_edit
@@ -434,5 +472,58 @@ api_key = \"sk-secreta\"  # no tocar
         let mut doc: DocumentMut = "notifications = false\n".parse().unwrap();
         apply_to_doc(&mut doc, &Config::default());
         assert!(doc.to_string().contains("notifications = true"));
+    }
+
+    #[test]
+    fn stats_por_defecto_y_parseo() {
+        let config: Config = toml::from_str(
+            r#"
+[stats]
+enabled = false
+default_period = "mes"
+history_days = 30
+sparkline = false
+"#,
+        )
+        .unwrap();
+        assert!(!config.stats.enabled);
+        assert_eq!(config.stats.default_period, "mes");
+        assert_eq!(config.stats.history_days, 30);
+        assert!(!config.stats.sparkline);
+
+        // sin tabla [stats] → defaults
+        let default: Config = toml::from_str("").unwrap();
+        assert!(default.stats.enabled);
+        assert_eq!(default.stats.default_period, "hoy");
+        assert_eq!(default.stats.history_days, 90);
+        assert!(default.stats.sparkline);
+    }
+
+    #[test]
+    fn apply_to_doc_persiste_stats_no_default_y_recarga() {
+        let mut doc: DocumentMut = "# cfg\n".parse().unwrap();
+        let config = Config {
+            stats: Stats {
+                enabled: false,
+                default_period: "semana".into(),
+                history_days: 30,
+                sparkline: false,
+            },
+            ..Config::default()
+        };
+        apply_to_doc(&mut doc, &config);
+        let out = doc.to_string();
+        assert!(out.contains("[stats]"), "tabla explícita: {out}");
+        assert!(out.contains("enabled = false"));
+        assert!(out.contains("default_period = \"semana\""));
+        assert!(out.contains("history_days = 30"));
+
+        let reloaded: Config = toml::from_str(&out).unwrap();
+        assert_eq!(reloaded.stats, config.stats);
+
+        // stats por defecto y sin tabla previa → no se escribe nada
+        let mut doc: DocumentMut = "# cfg\n".parse().unwrap();
+        apply_to_doc(&mut doc, &Config::default());
+        assert!(!doc.to_string().contains("[stats]"));
     }
 }

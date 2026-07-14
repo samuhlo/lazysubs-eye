@@ -37,6 +37,29 @@ SELECT part_rowid, part_id, provider_id, model_id, input_tokens, output_tokens,
        reasoning_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost
 FROM projected WHERE part_type = 'step-finish' AND message_role = 'assistant'";
 
+/// Como SQL_SUFFIX pero sin acotar por día ni por cursor: proyecta todas las
+/// filas step-finish con su time_created para agruparlas por día en Rust.
+/// Solo para el backfill del historial.
+const SQL_ALL_DAYS: &str = "
+WITH projected AS (
+  SELECT p.time_created AS time_created,
+         CASE WHEN json_valid(m.data) THEN json_extract(m.data, '$.providerID') END AS provider_id,
+         CASE WHEN json_valid(m.data) THEN json_extract(m.data, '$.modelID') END AS model_id,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.tokens.input') END AS input_tokens,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.tokens.output') END AS output_tokens,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.tokens.reasoning') END AS reasoning_tokens,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.tokens.cache.read') END AS cache_read_tokens,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.tokens.cache.write') END AS cache_write_tokens,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.tokens.total') END AS total_tokens,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.cost') END AS cost,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.type') END AS part_type,
+         CASE WHEN json_valid(m.data) THEN json_extract(m.data, '$.role') END AS message_role
+  FROM part AS p JOIN message AS m ON m.id = p.message_id
+)
+SELECT time_created, provider_id, model_id, input_tokens, output_tokens,
+       reasoning_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost
+FROM projected WHERE part_type = 'step-finish' AND message_role = 'assistant'";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnvSnapshot {
     pub opencode_db: Option<String>,
@@ -767,6 +790,88 @@ pub fn scan_opencode_today() -> OpenCodePanelState {
             OpenCodePanelState::Unavailable(OpenCodeUnavailableReason::Missing)
         }
     }
+}
+
+/// Uso de OpenCode por (provider, modelo) agrupado por día local, leyendo el
+/// histórico completo de la base SQLite. Para el backfill del historial (una
+/// sola vez). Best-effort: cualquier fallo devuelve lo que se pudo agregar.
+pub fn scan_opencode_all_days() -> Vec<(String, Vec<OpenCodeUsageRow>)> {
+    let path = match resolve_opencode_db(&EnvSnapshot::current()) {
+        DbResolution::File(path) => path,
+        _ => return vec![],
+    };
+    let Ok(connection) = open_read_only(&path) else {
+        return vec![];
+    };
+    if validate_schema(&connection).is_err() {
+        return vec![];
+    }
+    let Ok(mut statement) = connection.prepare(SQL_ALL_DAYS) else {
+        return vec![];
+    };
+    let mapped = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Value>(3)?,
+            row.get::<_, Value>(4)?,
+            row.get::<_, Value>(5)?,
+            row.get::<_, Value>(6)?,
+            row.get::<_, Value>(7)?,
+            row.get::<_, Value>(8)?,
+            row.get::<_, Value>(9)?,
+        ))
+    });
+    let Ok(rows) = mapped else {
+        return vec![];
+    };
+
+    let mut by_day: BTreeMap<String, Vec<ProjectedRow>> = BTreeMap::new();
+    for row in rows.flatten() {
+        let (
+            time_created,
+            provider,
+            model,
+            input,
+            output,
+            reasoning,
+            cache_read,
+            cache_write,
+            total,
+            cost,
+        ) = row;
+        let Some(date) = Local
+            .timestamp_millis_opt(time_created)
+            .single()
+            .map(|time| time.date_naive().to_string())
+        else {
+            continue;
+        };
+        let (Some(provider), Some(model)) = (
+            provider.filter(|value| !value.is_empty()),
+            model.filter(|value| !value.is_empty()),
+        ) else {
+            continue;
+        };
+        by_day.entry(date).or_default().push(ProjectedRow {
+            part_id: String::new(),
+            provider,
+            model,
+            input: value_token(input).unwrap_or(None),
+            output: value_token(output).unwrap_or(None),
+            reasoning: value_token(reasoning).unwrap_or(None),
+            cache_read: value_token(cache_read).unwrap_or(None),
+            cache_write: value_token(cache_write).unwrap_or(None),
+            total: value_token(total).unwrap_or(None),
+            cost: value_cost(cost).unwrap_or(None),
+        });
+    }
+
+    by_day
+        .into_iter()
+        .filter_map(|(date, rows)| aggregate_projected_rows(rows).ok().map(|rows| (date, rows)))
+        .collect()
 }
 
 #[cfg(test)]

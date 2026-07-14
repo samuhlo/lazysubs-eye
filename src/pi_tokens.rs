@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const SCHEMA_VERSION: u8 = 1;
@@ -551,15 +551,96 @@ fn update_pi_index(root: &Path, index_path: &Path, day_key: DayKey) -> Vec<PiUsa
 }
 
 pub fn scan_pi_today() -> Vec<PiUsageRow> {
-    let root = std::env::var_os("PI_CODING_AGENT_DIR")
+    let Some(root) = pi_sessions_root() else {
+        return vec![];
+    };
+    update_pi_index(&root, &cache::pi_daily_index_file(), DayKey::now())
+}
+
+fn add_pi_totals(acc: &mut PiUsageTotals, add: &PiUsageTotals) {
+    acc.input += add.input;
+    acc.output += add.output;
+    acc.cache_read += add.cache_read;
+    acc.cache_write += add.cache_write;
+    acc.total_tokens += add.total_tokens;
+    acc.cost_input += add.cost_input;
+    acc.cost_output += add.cost_output;
+    acc.cost_cache_read += add.cost_cache_read;
+    acc.cost_cache_write += add.cost_cache_write;
+    acc.cost_total += add.cost_total;
+}
+
+fn pi_sessions_root() -> Option<PathBuf> {
+    std::env::var_os("PI_CODING_AGENT_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .map(|root| root.join("sessions"))
         .or_else(|| {
             std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".pi/agent/sessions"))
-        });
-    let Some(root) = root else { return vec![] };
-    update_pi_index(&root, &cache::pi_daily_index_file(), DayKey::now())
+        })
+}
+
+/// Uso de Pi por (provider, modelo) agrupado por día local, escaneando todos
+/// los JSONL de sesiones sin índice incremental. Para el backfill del
+/// historial (una sola vez). Deduplica entradas por id entre ficheros.
+pub fn scan_pi_all_days() -> Vec<(String, Vec<PiUsageRow>)> {
+    let Some(root) = pi_sessions_root() else {
+        return vec![];
+    };
+    let mut paths = Vec::new();
+    walk(&root, &mut paths);
+
+    let mut seen_ids: BTreeSet<String> = BTreeSet::new();
+    let mut by_day: BTreeMap<String, BTreeMap<(String, String), PiUsageTotals>> = BTreeMap::new();
+    for path in paths {
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let Some(entry) = parse_pi_line(&line) else {
+                continue;
+            };
+            if !seen_ids.insert(entry.id.clone()) {
+                continue;
+            }
+            let Some(date) = Local
+                .timestamp_millis_opt(entry.timestamp_ms)
+                .single()
+                .map(|time| time.date_naive().to_string())
+            else {
+                continue;
+            };
+            let acc = by_day
+                .entry(date)
+                .or_default()
+                .entry((entry.provider, entry.model))
+                .or_default();
+            add_pi_totals(acc, &entry.totals);
+        }
+    }
+
+    by_day
+        .into_iter()
+        .map(|(date, groups)| {
+            let mut rows: Vec<_> = groups
+                .into_iter()
+                .map(|((provider, model), totals)| PiUsageRow {
+                    provider,
+                    model,
+                    totals,
+                })
+                .collect();
+            rows.sort_by(|left, right| {
+                right
+                    .totals
+                    .total_tokens
+                    .cmp(&left.totals.total_tokens)
+                    .then_with(|| left.provider.cmp(&right.provider))
+                    .then_with(|| left.model.cmp(&right.model))
+            });
+            (date, rows)
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -86,6 +86,17 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
   (E3). **Plan detallado con diseño y decisiones en
   [PLAN-PRODUCTO.md](PLAN-PRODUCTO.md)** — sustituye a la antigua Fase D
   (los providers de Gemini/OpenCode quedan como idea futura sin fase).
+- **Fase E1 — historial de gasto** ✓ (2026-07-14): módulo `history.rs`
+  (SQLite en `~/.local/state/lazysubs-eye/history.db`), upsert autoritativo
+  del día por fuente, ingesta desde el camino fresco de main y desde la TUI,
+  backfill one-shot de los días pasados (Claude/Pi/OpenCode) marcado en `meta`,
+  retención `history_days` y `prune`. En la TUI: tecla `t`/Tab cicla
+  hoy/semana/mes en los paneles de tokens (tabla agregada por modelo con coste)
+  y `Sparkline` del total diario (14 días) bajo cada panel. Config `[stats]`
+  (enabled/default_period/history_days/sparkline) con las tres patas + panel `o`
+  + README. Verificado en vivo contra los datos reales del usuario (backfill de
+  ~1 mes en las tres fuentes). Tests puros de la capa SQLite con base en
+  memoria. **90 tests** verdes. Pendiente de esta fase: nada (E2/E3 abiertas).
 - **Post-lanzamiento (2026-07-14, feedback del usuario)** ✓: fix del texto
   truncado "sin uso hoy" en el panel OpenCode (era una celda de tabla con
   columna de 10 chars; ahora es párrafo), degradación con datos previos ante

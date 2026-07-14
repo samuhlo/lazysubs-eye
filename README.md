@@ -41,9 +41,16 @@ Daily token usage panels are also built from local data:
 
 | Panel | Data source |
 |---|---|
-| Claude tokens today | JSONL transcripts in `~/.claude/projects` |
-| Pi tokens today | session JSONL in `~/.pi/agent/sessions` |
-| OpenCode tokens today | OpenCode SQLite database in `~/.local/state/opencode` |
+| Claude tokens | JSONL transcripts in `~/.claude/projects` |
+| Pi tokens | session JSONL in `~/.pi/agent/sessions` |
+| OpenCode tokens | OpenCode SQLite database in `~/.local/state/opencode` |
+
+Each panel can show **today, this week, or this month** — press `t` (or Tab) in
+the TUI to cycle the period. Usage is recorded into a local SQLite history
+(`$XDG_STATE_HOME/lazysubs-eye/history.db`) so past days survive even when the
+source transcripts get pruned; the first run backfills whatever history the
+sources still hold. A sparkline of the daily total sits under each panel. Turn
+the whole thing off with `[stats] enabled = false` (see Configuration).
 
 Everything runs locally: nothing is sent to third parties — only the official
 API of each provider is queried with your own credentials. lazysubs-eye **never
@@ -101,6 +108,12 @@ minimax = true
 # providers = ["minimax", "claude", "codex"]
 # panels = ["claude_tokens", "pi_tokens", "opencode_tokens"]
 
+[stats]              # per-day spend history (SQLite in $XDG_STATE_HOME)
+enabled = true       # false: no DB, no history panels (today-only, as before)
+default_period = "hoy" # initial panel period: hoy | semana | mes
+history_days = 90    # retention in days; 0 = keep everything
+sparkline = true     # daily-total sparkline under each token panel
+
 [icons]              # override the waybar/TUI icons
 claude = "✳"
 codex = "⬡"
@@ -119,10 +132,11 @@ panels` toggles the daily-token panels (disabled panels aren't even scanned).
 ### In-TUI settings
 
 Press `o` in the TUI to edit everything above interactively: arrow keys to
-move, space to toggle, `←`/`→` to adjust thresholds and TTL. Changes apply
-live (the bar picks them up on its next poll) and are written back to
-`config.toml` preserving your comments and any keys the panel doesn't manage
-(like the MiniMax `api_key`).
+move, space to toggle, `←`/`→` to adjust thresholds, TTL and the history
+settings. Changes apply live (the bar picks them up on its next poll) and are
+written back to `config.toml` preserving your comments and any keys the panel
+doesn't manage (like the MiniMax `api_key`). `t` (or Tab) cycles the token
+panels through today / this week / this month.
 
 ### Notifications
 

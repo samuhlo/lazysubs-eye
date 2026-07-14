@@ -16,6 +16,7 @@ src/
 │   └── minimax.rs     # collector de MiniMax (token plan; requiere api_key)
 ├── tokens.rs          # tokens de hoy por modelo (parseo de JSONL locales de Claude)
 ├── cache.rs           # cache JSON con TTL en ~/.cache/lazysubs-eye/status.json
+├── history.rs         # historial de gasto por día (SQLite en XDG_STATE_HOME)
 ├── config.rs          # config opcional (~/.config/lazysubs-eye/config.toml)
 ├── notify.rs          # notificaciones de umbral vía notify-send con anti-spam
 ├── output.rs          # render --waybar y --json + countdown() + umbrales de color
@@ -42,6 +43,26 @@ ventana persiste en `~/.cache/lazysubs-eye/notify-state.json`; se rearma si
 la ventana cambia de `resets_at` (reset) o baja del umbral. Un provider en
 error conserva su estado previo (no re-notifica al recuperarse). La lógica
 está en `plan()` (pura, testada); el envío en `send()`.
+
+### Historial de gasto (history.rs)
+
+Base SQLite en `~/.local/state/lazysubs-eye/history.db` (`XDG_STATE_HOME`, NO en
+la cache borrable). Una tabla `daily_usage` con PK `(date, source, provider,
+model)` y una tabla `meta`. Cada escaneo de "hoy" hace un **upsert autoritativo**
+(`record_day` = delete + insert de las filas de ese día y fuente), así el
+historial sobrevive aunque los JSONL/DB de origen se poden. Ingesta desde dos
+puntos: el camino fresco de main (`ingest_today`, escanea las tres fuentes en
+cada cache-miss de waybar) y la TUI (desde los resultados que ya recibe por
+canal, sin re-escanear). La primera vez, `maybe_backfill` puebla los días
+pasados desde las fuentes que aún existan (`claude_by_day` / `scan_pi_all_days`
+/ `scan_opencode_all_days`, escaneos completos one-shot) y marca `backfill_v1`
+en `meta`. Retención: `prune` borra lo más viejo que `history_days` al ingerir.
+La capa de base (init/record/query/series/prune/meta) opera sobre `&Connection`
+y se testea con `Connection::open_in_memory`; los puntos de entrada abren la
+base real y **nunca rompen el flujo** (ante error → vacío). Config en `[stats]`
+(`enabled`, `default_period`, `history_days`, `sparkline`). En la TUI, `t`/Tab
+cicla el periodo de los paneles de tokens (hoy/semana/mes) y hay un `Sparkline`
+del total diario de los últimos 14 días bajo cada panel.
 
 ### --check (main.rs)
 

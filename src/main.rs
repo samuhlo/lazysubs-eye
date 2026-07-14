@@ -1,5 +1,6 @@
 mod cache;
 mod config;
+mod history;
 mod install;
 mod notify;
 mod opencode_tokens;
@@ -105,6 +106,7 @@ fn main() {
         let fresh = providers::collect_all();
         cache::save(&fresh);
         notify::check(&fresh);
+        history::ingest_today();
         fresh
     });
 

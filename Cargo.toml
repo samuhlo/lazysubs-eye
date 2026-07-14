@@ -1,6 +1,6 @@
 [package]
 name = "lazysubs-eye"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 description = "AI subscription usage monitor for Omarchy (waybar + TUI)"
 license = "MIT"
