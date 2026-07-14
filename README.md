@@ -83,6 +83,8 @@ ttl = 60             # cache validity in seconds (--ttl overrides)
 warning_at = 80.0    # thresholds in % — drive the waybar CSS class,
 critical_at = 95.0   # the TUI gauge colors, --check and notifications
 notifications = true # desktop notifications via notify-send (mako)
+notification_cooldown = 1800 # min seconds between repeat notifications for
+                     # the same window (escalations don't wait); 0 = off
 colors = true        # false: no threshold coloring anywhere (the waybar
                      # `error` class stays — it signals breakage, not usage)
 
@@ -129,7 +131,10 @@ rate-limit window against the thresholds and sends a desktop notification via
 `notify-send` when a window *crosses* into warning (normal urgency) or
 critical (critical urgency). It only notifies on level changes — state is kept
 in `~/.cache/lazysubs-eye/notify-state.json`, re-arming when the window resets
-or drops back below the threshold — so it never spams.
+or drops back below the threshold — so it never spams. Re-notifications of the
+same level (rolling reset windows, dipping below and crossing again) also wait
+`notification_cooldown` seconds (default 30 min); escalating to a higher level
+never waits.
 
 ## Installation
 

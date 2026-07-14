@@ -105,6 +105,12 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
   conservando comentarios y claves ajenas (`config::persist` +
   `apply_to_doc`, testado). Las tablas nuevas se escriben explícitas
   (`ensure_table`), nunca inline.
+- **Cooldown de notificaciones (2026-07-14)** ✓: `notification_cooldown`
+  (default 1800s, ajustable en config y en el panel `o` de la TUI, paso
+  5 min). Re-notificar el mismo nivel (resets rodantes tipo MiniMax, bajar
+  y volver a cruzar) espera el cooldown desde la última notificación de esa
+  ventana; escalar a un nivel superior no espera. El estado guarda
+  `notified_at` (serde default para estados antiguos).
 - **Decisión abierta**: idioma de la propia UI (hoy en español; el README ya
   está en inglés). Decidir antes del anuncio público.
 

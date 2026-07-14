@@ -58,6 +58,7 @@ struct App {
 enum Setting {
     Section(&'static str),
     Notifications,
+    Cooldown,
     Colors,
     WarningAt,
     CriticalAt,
@@ -86,6 +87,7 @@ fn settings_items() -> Vec<Setting> {
     let mut items = vec![
         Setting::Section("general"),
         Setting::Notifications,
+        Setting::Cooldown,
         Setting::Colors,
         Setting::WarningAt,
         Setting::CriticalAt,
@@ -161,7 +163,11 @@ impl App {
                 config.critical_at = (config.critical_at + 5.0 * dir as f64).clamp(5.0, 100.0)
             }
             Setting::Ttl if dir != 0 => config.ttl = (config.ttl + 30 * dir).clamp(10, 3600),
-            Setting::WarningAt | Setting::CriticalAt | Setting::Ttl => return,
+            Setting::Cooldown if dir != 0 => {
+                config.notification_cooldown =
+                    (config.notification_cooldown + 300 * dir).clamp(0, 6 * 3600)
+            }
+            Setting::WarningAt | Setting::CriticalAt | Setting::Ttl | Setting::Cooldown => return,
             Setting::Provider(i) => {
                 let flag = match PROVIDER_IDS[i] {
                     "claude" => &mut config.providers.claude,
@@ -682,6 +688,10 @@ fn setting_row(item: &Setting, config: &crate::config::Config) -> (String, Strin
     match item {
         Setting::Section(_) => (String::new(), String::new()),
         Setting::Notifications => ("notificaciones".into(), check(config.notifications)),
+        Setting::Cooldown => (
+            "cooldown avisos (min)".into(),
+            format!("◂{:>4}▸", config.notification_cooldown / 60),
+        ),
         Setting::Colors => ("colores de umbral".into(), check(config.colors)),
         Setting::WarningAt => (
             "umbral warning".into(),

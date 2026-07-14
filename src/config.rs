@@ -21,6 +21,10 @@ pub struct Config {
     pub critical_at: f64,
     /// Notificaciones de escritorio (notify-send) al cruzar un umbral.
     pub notifications: bool,
+    /// Segundos mínimos entre notificaciones repetidas de una misma ventana
+    /// (resets rodantes, bajar y volver a cruzar). La escalada a un nivel
+    /// superior no espera. Alto por defecto para no ametrallar.
+    pub notification_cooldown: i64,
     /// Colores de umbral (clase warning/critical en waybar, semáforo de los
     /// gauges de la TUI). En false todo va en color neutro; la clase `error`
     /// se mantiene porque señala rotura, no uso.
@@ -102,6 +106,7 @@ impl Default for Config {
             warning_at: 80.0,
             critical_at: 95.0,
             notifications: true,
+            notification_cooldown: 30 * 60,
             colors: true,
             providers: Providers::default(),
             icons: Icons::default(),
@@ -244,6 +249,12 @@ fn apply_to_doc(doc: &mut DocumentMut, config: &Config) {
         "notifications",
         config.notifications != defaults.notifications,
         config.notifications.into(),
+    );
+    set_if(
+        doc,
+        "notification_cooldown",
+        config.notification_cooldown != defaults.notification_cooldown,
+        config.notification_cooldown.into(),
     );
     set_if(
         doc,
