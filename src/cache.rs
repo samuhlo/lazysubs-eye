@@ -64,10 +64,16 @@ fn atomic_save_with_rename(
 }
 
 pub fn load(ttl_secs: i64) -> Option<Status> {
-    let raw = std::fs::read_to_string(cache_file()).ok()?;
-    let status: Status = serde_json::from_str(&raw).ok()?;
+    let status = load_stale()?;
     let age = chrono::Utc::now().timestamp() - status.fetched_at;
     (age >= 0 && age < ttl_secs).then_some(status)
+}
+
+/// Último estado guardado, aunque el TTL haya expirado. Para degradar con
+/// datos previos cuando un provider falla (p. ej. 429).
+pub fn load_stale() -> Option<Status> {
+    let raw = std::fs::read_to_string(cache_file()).ok()?;
+    serde_json::from_str(&raw).ok()
 }
 
 pub fn save(status: &Status) {

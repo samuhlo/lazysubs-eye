@@ -21,6 +21,7 @@ pub struct Config {
     pub notifications: bool,
     pub providers: Providers,
     pub icons: Icons,
+    pub minimax: MiniMax,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq)]
@@ -28,6 +29,7 @@ pub struct Config {
 pub struct Providers {
     pub claude: bool,
     pub codex: bool,
+    pub minimax: bool,
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq)]
@@ -35,6 +37,17 @@ pub struct Providers {
 pub struct Icons {
     pub claude: Option<String>,
     pub codex: Option<String>,
+    pub minimax: Option<String>,
+}
+
+/// Credenciales de MiniMax: el plan solo se puede consultar con la
+/// Subscription Key del token plan (config o env `MINIMAX_API_KEY`).
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct MiniMax {
+    pub api_key: Option<String>,
+    /// Host alternativo (p. ej. https://api.minimaxi.com para China).
+    pub base_url: Option<String>,
 }
 
 impl Default for Config {
@@ -46,6 +59,7 @@ impl Default for Config {
             notifications: true,
             providers: Providers::default(),
             icons: Icons::default(),
+            minimax: MiniMax::default(),
         }
     }
 }
@@ -55,6 +69,7 @@ impl Default for Providers {
         Self {
             claude: true,
             codex: true,
+            minimax: true,
         }
     }
 }
@@ -65,6 +80,7 @@ impl Default for Icons {
         Self {
             claude: None,
             codex: None,
+            minimax: None,
         }
     }
 }
@@ -137,6 +153,9 @@ codex = false
 
 [icons]
 claude = "C"
+
+[minimax]
+api_key = "sk-test"
 "#,
         )
         .unwrap();
@@ -146,8 +165,11 @@ claude = "C"
         assert!(!config.notifications);
         assert!(config.providers.claude);
         assert!(!config.providers.codex);
+        assert!(config.providers.minimax);
         assert_eq!(config.icons.claude.as_deref(), Some("C"));
         assert_eq!(config.icons.codex, None);
+        assert_eq!(config.minimax.api_key.as_deref(), Some("sk-test"));
+        assert_eq!(config.minimax.base_url, None);
     }
 
     #[test]

@@ -159,6 +159,7 @@ mod tests {
                     active: true,
                 }],
                 reset_credits_available: None,
+                stale_since: None,
                 error: None,
             }],
         }

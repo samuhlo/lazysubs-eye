@@ -12,7 +12,8 @@ src/
 ├── providers/
 │   ├── mod.rs         # modelo de datos (Status/ProviderStatus/Window) + collect_all()
 │   ├── claude.rs      # collector de Claude Code (HTTP al endpoint OAuth)
-│   └── codex.rs       # collector de Codex (JSON-RPC a `codex app-server`)
+│   ├── codex.rs       # collector de Codex (JSON-RPC a `codex app-server`)
+│   └── minimax.rs     # collector de MiniMax (token plan; requiere api_key)
 ├── tokens.rs          # tokens de hoy por modelo (parseo de JSONL locales de Claude)
 ├── cache.rs           # cache JSON con TTL en ~/.cache/lazysubs-eye/status.json
 ├── config.rs          # config opcional (~/.config/lazysubs-eye/config.toml)
@@ -116,6 +117,25 @@ La respuesta trae `rateLimits.{primary,secondary}` con `usedPercent`,
 de pintar en la TUI). Timeout 15s; el proceso hijo se mata siempre vía guard
 `KillOnDrop`. El esquema completo del protocolo se regenera con:
 `codex app-server generate-json-schema --out <dir>`.
+
+### MiniMax (`providers/minimax.rs`)
+
+`GET https://api.minimax.io/v1/token_plan/remains` con
+`Authorization: Bearer <Subscription Key del token plan>` (config
+`[minimax] api_key` o env `MINIMAX_API_KEY`; `base_url` opcional para el host
+chino). Semántica verificada en vivo (documentada también en el módulo):
+`model_remains[]` por modelo (`general` = LLM del coding plan), tiempos en
+**milisegundos**, `*_remaining_percent` es cuota **restante** (se invierte) y
+`status == 3` marca ventanas fuera del plan contratado (se omiten).
+
+### Degradación con datos previos (providers/mod.rs)
+
+Si una consulta fresca falla (429 puntual, corte de red), `keep_stale_data()`
+rescata los datos del provider desde la cache anterior durante un periodo de
+gracia de 30 min (`STALE_GRACE_SECS`), marcándolos con `stale_since` (unix
+secs de la consulta buena original — no se encadena la gracia re-guardando).
+La UI lo señala: tooltip de waybar y título del panel TUI muestran "datos de
+hace Xm". Pasada la gracia, el error se muestra tal cual.
 
 ### Tokens de hoy (`tokens.rs`)
 

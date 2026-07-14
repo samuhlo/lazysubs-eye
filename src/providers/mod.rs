@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod codex;
+pub mod minimax;
 
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,10 @@ pub struct ProviderStatus {
     pub windows: Vec<Window>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_credits_available: Option<u64>,
+    /// Unix secs de cuándo se obtuvieron estos datos, si son de una consulta
+    /// anterior conservada porque la fresca falló (p. ej. 429).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stale_since: Option<i64>,
     pub error: Option<String>,
 }
 
@@ -34,6 +39,7 @@ impl ProviderStatus {
             plan: None,
             windows: vec![],
             reset_credits_available: None,
+            stale_since: None,
             error: Some(format!("{e:#}")),
         }
     }
@@ -54,6 +60,36 @@ pub struct Status {
     pub providers: Vec<ProviderStatus>,
 }
 
+/// Cuánto tiempo se siguen mostrando los datos de la última consulta buena
+/// cuando la fresca falla (429 puntual, corte de red…). Pasado el plazo, el
+/// error se muestra tal cual.
+const STALE_GRACE_SECS: i64 = 30 * 60;
+
+/// Sustituye los providers en error por sus datos de la consulta anterior si
+/// aún están dentro del periodo de gracia, marcándolos con `stale_since`.
+fn keep_stale_data(providers: &mut [ProviderStatus], previous: &Status, now: i64) {
+    for provider in providers {
+        if provider.error.is_none() {
+            continue;
+        }
+        let Some(old) = previous
+            .providers
+            .iter()
+            .find(|o| o.id == provider.id && o.error.is_none() && !o.windows.is_empty())
+        else {
+            continue;
+        };
+        // Si lo guardado ya era stale, la edad cuenta desde la consulta buena
+        // original, no desde la última vez que se re-guardó.
+        let data_from = old.stale_since.unwrap_or(previous.fetched_at);
+        if now - data_from <= STALE_GRACE_SECS {
+            let mut kept = old.clone();
+            kept.stale_since = Some(data_from);
+            *provider = kept;
+        }
+    }
+}
+
 pub fn collect_all() -> Status {
     let config = crate::config::get();
     let mut providers = Vec::new();
@@ -70,11 +106,24 @@ pub fn collect_all() -> Status {
                 .unwrap_or_else(|e| ProviderStatus::err("codex", "Codex", codex::ICON, e)),
         );
     }
+    if config.providers.minimax && minimax::available() {
+        providers.push(
+            minimax::collect()
+                .unwrap_or_else(|e| ProviderStatus::err("minimax", "MiniMax", minimax::ICON, e)),
+        );
+    }
+
+    if providers.iter().any(|p| p.error.is_some()) {
+        if let Some(previous) = crate::cache::load_stale() {
+            keep_stale_data(&mut providers, &previous, chrono::Utc::now().timestamp());
+        }
+    }
 
     for provider in &mut providers {
         let icon = match provider.id.as_str() {
             "claude" => config.icons.claude.as_ref(),
             "codex" => config.icons.codex.as_ref(),
+            "minimax" => config.icons.minimax.as_ref(),
             _ => None,
         };
         if let Some(icon) = icon {
@@ -92,6 +141,86 @@ pub fn collect_all() -> Status {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn provider(id: &str, percent: f64, error: Option<&str>) -> ProviderStatus {
+        ProviderStatus {
+            id: id.into(),
+            name: id.into(),
+            icon: "x".into(),
+            plan: Some("pro".into()),
+            windows: if error.is_some() {
+                vec![]
+            } else {
+                vec![Window {
+                    label: "5h".into(),
+                    used_percent: percent,
+                    resets_at: Some(1000),
+                    active: true,
+                }]
+            },
+            reset_credits_available: None,
+            stale_since: None,
+            error: error.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn un_error_conserva_los_datos_previos_dentro_de_la_gracia() {
+        let previous = Status {
+            fetched_at: 10_000,
+            providers: vec![provider("claude", 42.0, None)],
+        };
+        let mut fresh = vec![provider("claude", 0.0, Some("429"))];
+        keep_stale_data(&mut fresh, &previous, 10_000 + 60);
+        assert!(fresh[0].error.is_none());
+        assert_eq!(fresh[0].windows[0].used_percent, 42.0);
+        assert_eq!(fresh[0].stale_since, Some(10_000));
+    }
+
+    #[test]
+    fn pasada_la_gracia_se_muestra_el_error() {
+        let previous = Status {
+            fetched_at: 10_000,
+            providers: vec![provider("claude", 42.0, None)],
+        };
+        let mut fresh = vec![provider("claude", 0.0, Some("429"))];
+        keep_stale_data(&mut fresh, &previous, 10_000 + STALE_GRACE_SECS + 1);
+        assert!(fresh[0].error.is_some());
+    }
+
+    #[test]
+    fn la_gracia_cuenta_desde_la_consulta_buena_original() {
+        // el previo ya era stale: su edad viene de stale_since, no de fetched_at
+        let mut old = provider("claude", 42.0, None);
+        old.stale_since = Some(5_000);
+        let previous = Status {
+            fetched_at: 10_000,
+            providers: vec![old],
+        };
+        let mut fresh = vec![provider("claude", 0.0, Some("429"))];
+        keep_stale_data(&mut fresh, &previous, 5_000 + STALE_GRACE_SECS + 1);
+        assert!(fresh[0].error.is_some(), "no debe encadenar la gracia");
+
+        let mut fresh = vec![provider("claude", 0.0, Some("429"))];
+        keep_stale_data(&mut fresh, &previous, 5_000 + 60);
+        assert_eq!(fresh[0].stale_since, Some(5_000));
+    }
+
+    #[test]
+    fn sin_error_no_se_toca_nada_y_un_previo_en_error_no_sirve() {
+        let previous = Status {
+            fetched_at: 10_000,
+            providers: vec![provider("claude", 42.0, Some("caído"))],
+        };
+        let mut fresh = vec![provider("claude", 7.0, None)];
+        keep_stale_data(&mut fresh, &previous, 10_000);
+        assert_eq!(fresh[0].windows[0].used_percent, 7.0);
+        assert!(fresh[0].stale_since.is_none());
+
+        let mut errored = vec![provider("claude", 0.0, Some("429"))];
+        keep_stale_data(&mut errored, &previous, 10_000);
+        assert!(errored[0].error.is_some(), "un previo en error no rescata");
+    }
 
     #[test]
     fn reads_old_cache_and_omits_absent_reset_credits() {
@@ -133,6 +262,7 @@ mod tests {
                 plan: Some("pro".into()),
                 windows: vec![],
                 reset_credits_available: credits,
+                stale_since: None,
                 error: None,
             };
             let value = serde_json::to_value(provider).unwrap();

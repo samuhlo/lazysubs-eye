@@ -83,6 +83,15 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
 - **Fase D — v1.x**: providers de cuotas para Gemini CLI y OpenCode,
   historial + sparklines (`~/.local/state/lazysubs-eye/`), coste estimado y
   desglose por proyecto.
+- **Post-lanzamiento (2026-07-14, feedback del usuario)** ✓: fix del texto
+  truncado "sin uso hoy" en el panel OpenCode (era una celda de tabla con
+  columna de 10 chars; ahora es párrafo), degradación con datos previos ante
+  429/fallos puntuales (gracia 30 min, `stale_since`, indicado en tooltip y
+  TUI), provider MiniMax (token plan; ver ARQUITECTURA § MiniMax) con
+  `[minimax] api_key` en config, y sección Contributing en el README (el
+  proyecto se plantea como open source colaborativo para cubrir más
+  providers). La config del usuario con su key de MiniMax está en
+  `~/.config/lazysubs-eye/config.toml` (0600).
 - **Decisión abierta**: idioma de la propia UI (hoy en español; el README ya
   está en inglés). Decidir antes del anuncio público.
 

@@ -322,15 +322,34 @@ impl App {
             "provider", "modelo", "in", "out", "raz", "cache→", "cache+", "total", "coste",
         ])
         .style(Style::new().fg(DIM).add_modifier(Modifier::BOLD));
-        let rows = match &self.opencode_tokens {
+        let title = match &self.opencode_tokens {
+            OpenCodePanelState::Stale { reason, .. } => {
+                format!(" OpenCode hoy · {} ", unavailable_text(*reason))
+            }
+            _ => " OpenCode hoy ".into(),
+        };
+        // Los estados sin datos van como párrafo, no como fila: las celdas de
+        // la tabla truncan el texto al ancho de la primera columna.
+        let message = match &self.opencode_tokens {
+            OpenCodePanelState::Ready(_) | OpenCodePanelState::Stale { .. } => None,
+            OpenCodePanelState::Loading => Some("leyendo OpenCode…"),
+            OpenCodePanelState::Empty => Some("sin uso hoy"),
+            OpenCodePanelState::Unavailable(reason) => Some(unavailable_text(*reason)),
+        };
+        if let Some(message) = message {
+            f.render_widget(
+                Paragraph::new(message)
+                    .style(Style::new().fg(DIM))
+                    .block(bordered(title).padding(Padding::horizontal(1))),
+                area,
+            );
+            return;
+        }
+        let rows: Vec<Row> = match &self.opencode_tokens {
             OpenCodePanelState::Ready(rows) | OpenCodePanelState::Stale { rows, .. } => {
                 rows.iter().map(opencode_table_row).collect()
             }
-            OpenCodePanelState::Loading => vec![Row::new(vec!["leyendo OpenCode…"])],
-            OpenCodePanelState::Empty => vec![Row::new(vec!["sin uso hoy"])],
-            OpenCodePanelState::Unavailable(reason) => {
-                vec![Row::new(vec![unavailable_text(*reason)])]
-            }
+            _ => unreachable!("estados sin datos ya renderizados como párrafo"),
         };
         let widths = [
             Constraint::Length(10),
@@ -343,12 +362,6 @@ impl App {
             Constraint::Length(8),
             Constraint::Length(9),
         ];
-        let title = match &self.opencode_tokens {
-            OpenCodePanelState::Stale { reason, .. } => {
-                format!(" OpenCode hoy · {} ", unavailable_text(*reason))
-            }
-            _ => " OpenCode hoy ".into(),
-        };
         f.render_widget(
             Table::new(rows, widths)
                 .header(header)
@@ -467,8 +480,12 @@ fn percent_color(pct: f64) -> Color {
 
 fn draw_provider(f: &mut Frame, area: Rect, p: &ProviderStatus) {
     let plan = p.plan.as_deref().unwrap_or("?");
+    let plan_title = match p.stale_since {
+        Some(since) => format!(" {plan} · datos de hace {} ", crate::output::age(since)),
+        None => format!(" {plan} "),
+    };
     let block = bordered(format!(" {} {} ", p.icon, p.name))
-        .title(Span::styled(format!(" {plan} "), Style::new().fg(DIM)));
+        .title(Span::styled(plan_title, Style::new().fg(DIM)));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
@@ -571,6 +588,7 @@ mod tests {
                 },
             ],
             reset_credits_available: credits,
+            stale_since: None,
             error: error.map(str::to_owned),
         }
     }

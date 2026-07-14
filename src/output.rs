@@ -17,6 +17,19 @@ pub fn countdown(resets_at: i64) -> String {
     }
 }
 
+/// Edad de un instante pasado, con el mismo formato que countdown().
+pub fn age(since: i64) -> String {
+    let secs = (chrono::Utc::now().timestamp() - since).max(0);
+    let (d, h, m) = (secs / 86400, (secs % 86400) / 3600, (secs % 3600) / 60);
+    if d > 0 {
+        format!("{d}d{h}h")
+    } else if h > 0 {
+        format!("{h}h{m:02}m")
+    } else {
+        format!("{m}m")
+    }
+}
+
 fn class_for(percent: f64) -> &'static str {
     let config = config::get();
     if percent >= config.critical_at {
@@ -47,6 +60,9 @@ pub fn waybar(status: &Status) -> String {
 
         let plan = p.plan.as_deref().unwrap_or("?");
         tooltip.push(format!("{} ({plan})", p.name));
+        if let Some(since) = p.stale_since {
+            tooltip.push(format!("  datos de hace {}", age(since)));
+        }
         for w in &p.windows {
             let reset = w
                 .resets_at
@@ -102,6 +118,7 @@ mod tests {
                     active: true,
                 }],
                 reset_credits_available: credits,
+                stale_since: None,
                 error: error.map(str::to_owned),
             }],
         }

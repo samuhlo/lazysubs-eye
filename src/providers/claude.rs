@@ -123,6 +123,7 @@ pub fn collect() -> Result<ProviderStatus> {
         plan: creds.oauth.subscription_type,
         windows,
         reset_credits_available: None,
+        stale_since: None,
         error: None,
     })
 }

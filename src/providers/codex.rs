@@ -128,6 +128,7 @@ fn provider_status_from_rate_limits(response: RateLimitsResponse) -> ProviderSta
         plan: rate_limits.plan_type,
         windows,
         reset_credits_available,
+        stale_since: None,
         error: None,
     }
 }

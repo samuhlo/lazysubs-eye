@@ -31,6 +31,11 @@ the active Omarchy theme) with zero configuration.
 |---|---|---|
 | Claude Code | OAuth endpoint `api.anthropic.com/api/oauth/usage` with the token from `~/.claude/.credentials.json` | logged in to Claude Code |
 | Codex | JSON-RPC via `codex app-server` (`account/rateLimits/read`), including reset credits | `codex login` |
+| MiniMax | `GET /v1/token_plan/remains` (coding/token plan windows) | subscription key in `[minimax] api_key` or `MINIMAX_API_KEY` |
+
+If a fresh query fails (a stray 429, a network blip) the last good data is
+kept on screen for up to 30 minutes — marked as aged in the tooltip and the
+TUI — instead of wiping the panel with an error.
 
 Daily token usage panels are also built from local data:
 
@@ -82,10 +87,16 @@ notifications = true # desktop notifications via notify-send (mako)
 [providers]          # disable a provider even if its CLI is logged in
 claude = true
 codex = true
+minimax = true
 
 [icons]              # override the waybar/TUI icons
 claude = "✳"
 codex = "⬡"
+minimax = "◆"
+
+[minimax]            # MiniMax needs its token-plan Subscription Key
+api_key = "..."      # or the MINIMAX_API_KEY env var
+# base_url = "https://api.minimaxi.com"  # alternate host (e.g. China)
 ```
 
 ### Notifications
@@ -158,7 +169,22 @@ Internal docs are in Spanish:
 - [x] `lazysubs-eye install` / `uninstall` (one-command waybar + Hyprland setup)
 - [x] CI + release binaries (static musl) + AUR PKGBUILD
 - [x] Config file, threshold notifications (mako), `--check` for scripts
+- [x] MiniMax provider · graceful degradation on transient API errors
 - [ ] Quota providers for Gemini CLI and OpenCode, history + sparklines
+
+## Contributing
+
+Contributions are very welcome — this project gets better the more AI
+subscriptions it covers, and everyone's stack is different. If your provider
+isn't supported, adding it is deliberately small: a provider is one module in
+`src/providers/` implementing `available()` (is it configured?) and
+`collect()` (fetch quota windows), plus a couple of lines to register it in
+`src/providers/mod.rs` and `src/config.rs`. See `src/providers/minimax.rs`
+for a compact example with tests. Notifications, `--check`, waybar classes
+and graceful degradation then work for your provider for free.
+
+Bug reports, UI ideas and docs fixes are just as appreciated — open an issue
+or a PR.
 
 ## License
 
