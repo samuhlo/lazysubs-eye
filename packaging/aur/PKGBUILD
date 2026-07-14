@@ -13,7 +13,7 @@ optdepends=(
   'hyprland: floating TUI window rule'
 )
 source=("$url/releases/download/v$pkgver/lazysubs-eye-$pkgver-x86_64-linux-musl.tar.gz")
-sha256sums=('SKIP') # se rellena con la release
+sha256sums=('312256051d92c04e080c72ce6d5fd66ec3becbfc8a9c6878de593fd142e0a467')
 
 package() {
   cd "lazysubs-eye-$pkgver-x86_64-linux-musl"
