@@ -30,8 +30,10 @@ pub fn age(since: i64) -> String {
     }
 }
 
-fn class_for(percent: f64) -> &'static str {
-    let config = config::get();
+fn class_for(percent: f64, config: &config::Config) -> &'static str {
+    if !config.colors {
+        return "normal";
+    }
     if percent >= config.critical_at {
         "critical"
     } else if percent >= config.warning_at {
@@ -42,12 +44,16 @@ fn class_for(percent: f64) -> &'static str {
 }
 
 pub fn waybar(status: &Status) -> String {
+    waybar_with(status, config::get())
+}
+
+fn waybar_with(status: &Status, config: &config::Config) -> String {
     let mut parts = Vec::new();
     let mut tooltip = Vec::new();
     let mut max_percent: f64 = 0.0;
     let mut has_error = false;
 
-    for p in &status.providers {
+    for p in crate::providers::select(&status.providers, &config.waybar.providers) {
         if let Some(err) = &p.error {
             parts.push(format!("{} !", p.icon));
             tooltip.push(format!("{}: {}", p.name, err));
@@ -56,7 +62,11 @@ pub fn waybar(status: &Status) -> String {
         }
         let Some(worst) = p.worst() else { continue };
         max_percent = max_percent.max(worst.used_percent);
-        parts.push(format!("{} {:.0}%", p.icon, worst.used_percent));
+        if config.waybar.percent() {
+            parts.push(format!("{} {:.0}%", p.icon, worst.used_percent));
+        } else {
+            parts.push(p.icon.clone());
+        }
 
         let plan = p.plan.as_deref().unwrap_or("?");
         tooltip.push(format!("{} ({plan})", p.name));
@@ -82,7 +92,7 @@ pub fn waybar(status: &Status) -> String {
     let class = if has_error {
         "error"
     } else {
-        class_for(max_percent)
+        class_for(max_percent, config)
     };
 
     json!({
@@ -149,6 +159,44 @@ mod tests {
             waybar(&status(Some(0), Some("falló"))),
             waybar(&status(None, Some("falló")))
         );
+    }
+
+    #[test]
+    fn waybar_respeta_visibilidad_orden_percent_y_colors() {
+        let mut status = status(None, None);
+        status.providers.push(ProviderStatus {
+            id: "claude".into(),
+            name: "Claude Code".into(),
+            icon: "✳".into(),
+            plan: Some("pro".into()),
+            windows: vec![Window {
+                label: "5h".into(),
+                used_percent: 90.0,
+                resets_at: None,
+                active: true,
+            }],
+            reset_credits_available: None,
+            stale_since: None,
+            error: None,
+        });
+        let mut config = crate::config::Config::default();
+
+        // orden invertido y con un provider oculto
+        config.waybar.providers = Some(vec!["claude".into()]);
+        let out: serde_json::Value = serde_json::from_str(&waybar_with(&status, &config)).unwrap();
+        assert_eq!(out["text"], "✳ 90%");
+        assert_eq!(out["class"], "warning"); // el codex al 40% oculto no cuenta
+
+        // solo iconos
+        config.waybar.percent = Some(false);
+        let out: serde_json::Value = serde_json::from_str(&waybar_with(&status, &config)).unwrap();
+        assert_eq!(out["text"], "✳");
+
+        // sin colores de umbral: clase siempre normal (percentage se mantiene)
+        config.colors = false;
+        let out: serde_json::Value = serde_json::from_str(&waybar_with(&status, &config)).unwrap();
+        assert_eq!(out["class"], "normal");
+        assert_eq!(out["percentage"], 90);
     }
 
     #[test]

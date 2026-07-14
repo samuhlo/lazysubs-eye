@@ -83,11 +83,21 @@ ttl = 60             # cache validity in seconds (--ttl overrides)
 warning_at = 80.0    # thresholds in % — drive the waybar CSS class,
 critical_at = 95.0   # the TUI gauge colors, --check and notifications
 notifications = true # desktop notifications via notify-send (mako)
+colors = true        # false: no threshold coloring anywhere (the waybar
+                     # `error` class stays — it signals breakage, not usage)
 
-[providers]          # disable a provider even if its CLI is logged in
+[providers]          # disable a provider entirely (it isn't even queried)
 claude = true
 codex = true
 minimax = true
+
+[waybar]             # what the bar shows — independent of the TUI
+# providers = ["claude", "minimax"]   # which ones AND their order
+# percent = false                     # icons only
+
+[tui]                # what the TUI shows
+# providers = ["minimax", "claude", "codex"]
+# panels = ["claude_tokens", "pi_tokens", "opencode_tokens"]
 
 [icons]              # override the waybar/TUI icons
 claude = "✳"
@@ -98,6 +108,11 @@ minimax = "◆"
 api_key = "..."      # or the MINIMAX_API_KEY env var
 # base_url = "https://api.minimaxi.com"  # alternate host (e.g. China)
 ```
+
+`[waybar] providers` and `[tui] providers` control both visibility and order,
+per surface — e.g. keep the bar minimal with one provider while the TUI shows
+everything. Hidden providers don't drive the bar's CSS class either. `[tui]
+panels` toggles the daily-token panels (disabled panels aren't even scanned).
 
 ### Notifications
 

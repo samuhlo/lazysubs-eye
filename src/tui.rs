@@ -89,19 +89,20 @@ impl App {
             });
             let _ = tx.send(Update::Status(status));
         });
-        if self.begin_token_scan() {
+        let panels = &crate::config::get().tui;
+        if panels.panel("claude_tokens") && self.begin_token_scan() {
             let tx = self.tx.clone();
             std::thread::spawn(move || {
                 let _ = tx.send(Update::Tokens(tokens::claude_today()));
             });
         }
-        if self.begin_pi_token_scan() {
+        if panels.panel("pi_tokens") && self.begin_pi_token_scan() {
             let tx = self.tx.clone();
             std::thread::spawn(move || {
                 let _ = tx.send(Update::PiTokens(pi_tokens::scan_pi_today()));
             });
         }
-        if self.begin_opencode_token_scan() {
+        if panels.panel("opencode_tokens") && self.begin_opencode_token_scan() {
             let tx = self.tx.clone();
             std::thread::spawn(move || {
                 let _ = tx.send(Update::OpenCodeTokens(
@@ -198,37 +199,47 @@ impl App {
             return;
         };
 
+        let tui_config = &crate::config::get().tui;
+        let providers = providers::select(&status.providers, &tui_config.providers);
+        let show_tokens = tui_config.panel("claude_tokens") && !self.tokens.is_empty();
+        let show_pi = tui_config.panel("pi_tokens") && !self.pi_tokens.is_empty();
+        let show_opencode = tui_config.panel("opencode_tokens");
+
         let mut constraints = vec![Constraint::Length(1)]; // cabecera
-        for p in &status.providers {
+        for p in &providers {
             constraints.push(Constraint::Length(provider_height(p)));
         }
-        if !self.tokens.is_empty() {
+        if show_tokens {
             constraints.push(Constraint::Length(self.tokens.len() as u16 + 3));
         }
-        if !self.pi_tokens.is_empty() {
+        if show_pi {
             constraints.push(Constraint::Length(pi_section_height(self.pi_tokens.len())));
         }
-        constraints.push(Constraint::Length(opencode_section_height(
-            &self.opencode_tokens,
-        )));
+        if show_opencode {
+            constraints.push(Constraint::Length(opencode_section_height(
+                &self.opencode_tokens,
+            )));
+        }
         constraints.push(Constraint::Min(0)); // relleno
         constraints.push(Constraint::Length(1)); // pie
         let areas = Layout::vertical(constraints).split(f.area());
 
         self.draw_header(f, areas[0]);
-        for (i, p) in status.providers.iter().enumerate() {
+        for (i, p) in providers.iter().enumerate() {
             draw_provider(f, areas[i + 1], p);
         }
-        let mut section = status.providers.len() + 1;
-        if !self.tokens.is_empty() {
+        let mut section = providers.len() + 1;
+        if show_tokens {
             self.draw_tokens(f, areas[section]);
             section += 1;
         }
-        if !self.pi_tokens.is_empty() {
+        if show_pi {
             self.draw_pi_tokens(f, areas[section]);
             section += 1;
         }
-        self.draw_opencode_tokens(f, areas[section]);
+        if show_opencode {
+            self.draw_opencode_tokens(f, areas[section]);
+        }
         self.draw_footer(f, areas[areas.len() - 1], status);
     }
 
@@ -469,6 +480,9 @@ fn bordered<'a>(title: impl Into<std::borrow::Cow<'a, str>>) -> Block<'a> {
 
 fn percent_color(pct: f64) -> Color {
     let config = crate::config::get();
+    if !config.colors {
+        return Color::Reset; // color del terminal, sin semáforo
+    }
     if pct >= config.critical_at {
         Color::Red
     } else if pct >= config.warning_at {

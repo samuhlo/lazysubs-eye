@@ -92,6 +92,12 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
   proyecto se plantea como open source colaborativo para cubrir más
   providers). La config del usuario con su key de MiniMax está en
   `~/.config/lazysubs-eye/config.toml` (0600).
+- **Opciones de superficie (2026-07-14)** ✓: `[waybar]`/`[tui]` en config
+  con `providers` (visibilidad **y orden** por superficie; los ocultos no
+  cuentan para la clase CSS de la barra), `percent = false` (waybar solo
+  iconos), `[tui] panels` para los paneles de tokens (apagados ni se
+  escanean) y `colors = false` global (sin semáforo; la clase `error` se
+  mantiene).
 - **Decisión abierta**: idioma de la propia UI (hoy en español; el README ya
   está en inglés). Decidir antes del anuncio público.
 

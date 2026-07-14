@@ -19,9 +19,52 @@ pub struct Config {
     pub critical_at: f64,
     /// Notificaciones de escritorio (notify-send) al cruzar un umbral.
     pub notifications: bool,
+    /// Colores de umbral (clase warning/critical en waybar, semáforo de los
+    /// gauges de la TUI). En false todo va en color neutro; la clase `error`
+    /// se mantiene porque señala rotura, no uso.
+    pub colors: bool,
     pub providers: Providers,
     pub icons: Icons,
     pub minimax: MiniMax,
+    pub waybar: Waybar,
+    pub tui: Tui,
+}
+
+/// Qué pinta el módulo de waybar.
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Waybar {
+    /// Providers visibles en la barra **y su orden** (ids: "claude", "codex",
+    /// "minimax"). Ausente = todos, en el orden de colección.
+    pub providers: Option<Vec<String>>,
+    /// En false la barra muestra solo los iconos, sin porcentaje.
+    pub percent: Option<bool>,
+}
+
+impl Waybar {
+    pub fn percent(&self) -> bool {
+        self.percent.unwrap_or(true)
+    }
+}
+
+/// Qué pinta la TUI.
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct Tui {
+    /// Providers visibles en la TUI y su orden. Ausente = todos.
+    pub providers: Option<Vec<String>>,
+    /// Paneles de tokens diarios: "claude_tokens", "pi_tokens",
+    /// "opencode_tokens". Ausente = todos.
+    pub panels: Option<Vec<String>>,
+}
+
+impl Tui {
+    pub fn panel(&self, name: &str) -> bool {
+        match &self.panels {
+            Some(panels) => panels.iter().any(|p| p == name),
+            None => true,
+        }
+    }
 }
 
 #[derive(Deserialize, Debug, Clone, PartialEq)]
@@ -57,9 +100,12 @@ impl Default for Config {
             warning_at: 80.0,
             critical_at: 95.0,
             notifications: true,
+            colors: true,
             providers: Providers::default(),
             icons: Icons::default(),
             minimax: MiniMax::default(),
+            waybar: Waybar::default(),
+            tui: Tui::default(),
         }
     }
 }
@@ -156,6 +202,13 @@ claude = "C"
 
 [minimax]
 api_key = "sk-test"
+
+[waybar]
+providers = ["minimax", "claude"]
+percent = false
+
+[tui]
+panels = ["claude_tokens"]
 "#,
         )
         .unwrap();
@@ -170,6 +223,15 @@ api_key = "sk-test"
         assert_eq!(config.icons.codex, None);
         assert_eq!(config.minimax.api_key.as_deref(), Some("sk-test"));
         assert_eq!(config.minimax.base_url, None);
+        assert_eq!(
+            config.waybar.providers,
+            Some(vec!["minimax".into(), "claude".into()])
+        );
+        assert!(!config.waybar.percent());
+        assert!(config.tui.providers.is_none());
+        assert!(config.tui.panel("claude_tokens"));
+        assert!(!config.tui.panel("pi_tokens"));
+        assert!(config.colors); // default si no se toca
     }
 
     #[test]

@@ -90,6 +90,21 @@ fn keep_stale_data(providers: &mut [ProviderStatus], previous: &Status, now: i64
     }
 }
 
+/// Providers visibles en una superficie (waybar o TUI), en el orden pedido.
+/// `None` = todos en el orden de colección; ids desconocidos se ignoran.
+pub fn select<'a>(
+    providers: &'a [ProviderStatus],
+    selection: &Option<Vec<String>>,
+) -> Vec<&'a ProviderStatus> {
+    match selection {
+        None => providers.iter().collect(),
+        Some(ids) => ids
+            .iter()
+            .filter_map(|id| providers.iter().find(|p| &p.id == id))
+            .collect(),
+    }
+}
+
 pub fn collect_all() -> Status {
     let config = crate::config::get();
     let mut providers = Vec::new();
@@ -162,6 +177,27 @@ mod tests {
             stale_since: None,
             error: error.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn select_filtra_ordena_e_ignora_desconocidos() {
+        let all = vec![
+            provider("claude", 10.0, None),
+            provider("codex", 20.0, None),
+            provider("minimax", 30.0, None),
+        ];
+        let ids = |sel: &Option<Vec<String>>| {
+            select(&all, sel)
+                .iter()
+                .map(|p| p.id.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&None), ["claude", "codex", "minimax"]);
+        assert_eq!(
+            ids(&Some(vec!["minimax".into(), "claude".into()])),
+            ["minimax", "claude"]
+        );
+        assert_eq!(ids(&Some(vec!["gemini".into()])), Vec::<String>::new());
     }
 
     #[test]
