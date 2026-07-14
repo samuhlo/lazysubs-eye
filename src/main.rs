@@ -1,4 +1,5 @@
 mod cache;
+mod install;
 mod opencode_tokens;
 mod output;
 mod pi_tokens;
@@ -10,16 +11,21 @@ use std::io::IsTerminal;
 
 const DEFAULT_TTL_SECS: i64 = 60;
 
+const DEFAULT_SIGNAL: u8 = 11;
+
 const HELP: &str = "\
 lazysubs — monitor de cuotas de suscripciones de IA (Claude Code, Codex)
 
-Uso: lazysubs [tui|--json|--waybar] [--no-cache] [--ttl <segundos>]
+Uso: lazysubs [tui|install|uninstall|--json|--waybar] [opciones]
 
   tui         interfaz de terminal (por defecto si stdout es una tty)
+  install     integra lazysubs en waybar y Hyprland (idempotente, con backups)
+  uninstall   revierte la integración
   --json      volcado completo del estado (por defecto sin tty)
   --waybar    JSON de una línea para un módulo custom de waybar
   --no-cache  fuerza una consulta fresca a los providers
   --ttl N     validez de la cache en segundos (por defecto 60)
+  --signal N  señal RTMIN+N del módulo waybar en install (por defecto 11)
   --version   muestra la versión
 ";
 
@@ -31,11 +37,14 @@ fn main() {
     };
     let mut use_cache = true;
     let mut ttl = DEFAULT_TTL_SECS;
+    let mut signal = DEFAULT_SIGNAL;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "tui" | "--tui" => mode = "tui",
+            "install" => mode = "install",
+            "uninstall" => mode = "uninstall",
             "--json" => mode = "json",
             "--waybar" => mode = "waybar",
             "--no-cache" => use_cache = false,
@@ -44,6 +53,12 @@ fn main() {
                     .next()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(DEFAULT_TTL_SECS)
+            }
+            "--signal" => {
+                signal = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(DEFAULT_SIGNAL)
             }
             "-h" | "--help" => {
                 print!("{HELP}");
@@ -63,6 +78,19 @@ fn main() {
     if mode == "tui" {
         if let Err(e) = tui::run() {
             eprintln!("error en la TUI: {e:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if mode == "install" || mode == "uninstall" {
+        let result = if mode == "install" {
+            install::install(signal)
+        } else {
+            install::uninstall()
+        };
+        if let Err(e) = result {
+            eprintln!("error en {mode}: {e:#}");
             std::process::exit(1);
         }
         return;

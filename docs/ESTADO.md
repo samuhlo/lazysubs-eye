@@ -55,11 +55,18 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
   docs al día ✓. Pendiente de la fase: captura PNG real de la TUI y del
   módulo waybar para el README (no hay herramienta de captura instalada;
   de momento hay una muestra en texto).
-- **Fase B — instalación en un comando**: subcomando `lazysubs install` /
-  `uninstall` (módulo waybar + CSS + windowrule, idempotente, backups
-  `.bak.<epoch>`, recarga), CSS por defecto neutro (sin la paleta personal),
-  señal RTMIN configurable, CI (fmt+clippy+test), release con binario
-  estático y PKGBUILD para AUR.
+- **Fase B — instalación en un comando** ✓ (2026-07-14): subcomando
+  `lazysubs install` / `uninstall` (módulo waybar + CSS neutro + windowrule,
+  idempotente, backups `.bak.<epoch>`, marcadores lazysubs-begin/end,
+  recarga; ver ARQUITECTURA.md § install), `--signal N` configurable, CI
+  (fmt+clippy+test en `.github/workflows/ci.yml`), release con binario
+  estático musl al taggear `v*` (`release.yml`) y PKGBUILD de `lazysubs-bin`
+  en `packaging/aur/`. Pendiente de la fase: crear el repo en GitHub
+  (previsto `github.com/samuhlo/lazysubs`, referenciado en el PKGBUILD),
+  validar el primer build musl en CI, rellenar el sha256 del PKGBUILD con la
+  primera release y publicarlo en AUR. El `install` no se ha ejecutado
+  contra el sistema del usuario (su integración manual sigue intacta; el
+  ciclo completo está validado en sandbox y con tests de round-trip).
 - **Fase C — producto redondo**: `~/.config/lazysubs/config.toml` (umbrales,
   TTL, providers, iconos), notificaciones 80%/95% vía notify-send con
   anti-spam en la cache, `--check` para scripts.

@@ -50,10 +50,13 @@ shows a reauth notice.
 ```
 lazysubs            # TUI if stdout is a tty; JSON otherwise
 lazysubs tui        # explicit TUI (q quit · r refresh; auto-refresh 60s)
+lazysubs install    # wire up waybar + Hyprland (idempotent, with backups)
+lazysubs uninstall  # revert the integration
 lazysubs --json     # full JSON dump of the state
 lazysubs --waybar   # single-line JSON for a custom waybar module
 lazysubs --no-cache # force a fresh query
 lazysubs --ttl 120  # cache validity (seconds, default 60)
+lazysubs --signal 8 # RTMIN+N signal for the waybar module (install, default 11)
 lazysubs --version  # print version
 ```
 
@@ -62,13 +65,28 @@ so waybar can poll every 60 s for free).
 
 ## Installation
 
-Requires Rust (an AUR package is planned):
+From source (requires Rust; an AUR package — `lazysubs-bin` — is planned,
+see `packaging/aur/PKGBUILD`):
 
 ```
 cargo install --path .
 ```
 
-## Waybar integration
+Then let lazysubs wire itself into your Omarchy setup:
+
+```
+lazysubs install
+```
+
+This inserts the waybar module (first in `modules-right`), theme-neutral CSS
+and the Hyprland windowrule for the floating TUI, then reloads both. Every
+touched file gets a `.bak.<epoch>` backup, everything inserted is fenced with
+`lazysubs-begin`/`lazysubs-end` markers, and `lazysubs uninstall` reverts it
+byte for byte. Use `--signal N` if RTMIN+11 collides with another module.
+
+## Waybar integration (manual)
+
+What `lazysubs install` sets up, if you prefer to do it by hand:
 
 ```jsonc
 "custom/ai-usage": {
@@ -103,8 +121,8 @@ Internal docs are in Spanish:
 - [x] Phase 2 — waybar integration + floating window on Hyprland
 - [x] Phase 3 — TUI (ratatui) with terminal theming + today's tokens per model
 - [x] Codex reset credits · daily tokens for Pi and OpenCode
-- [ ] `lazysubs install` / `uninstall` (one-command waybar + Hyprland setup)
-- [ ] CI + release binaries + AUR package
+- [x] `lazysubs install` / `uninstall` (one-command waybar + Hyprland setup)
+- [x] CI + release binaries (static musl) + AUR PKGBUILD
 - [ ] Config file, threshold notifications (mako), `--check` for scripts
 - [ ] Quota providers for Gemini CLI and OpenCode, history + sparklines
 

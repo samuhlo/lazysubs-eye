@@ -16,14 +16,38 @@ src/
 ├── tokens.rs          # tokens de hoy por modelo (parseo de JSONL locales de Claude)
 ├── cache.rs           # cache JSON con TTL en ~/.cache/lazysubs/status.json
 ├── output.rs          # render --waybar y --json + countdown() + umbrales de color
+├── install.rs         # subcomandos install/uninstall (waybar + hyprland)
 └── tui.rs             # TUI ratatui (gauges, countdowns, tabla de tokens)
 ```
+
+### install / uninstall (install.rs)
+
+`lazysubs install [--signal N]` integra el módulo en el sistema editando los
+configs **por texto** (nunca se reserializa el JSONC: se conservan comentarios
+y formato del usuario):
+
+- `~/.config/waybar/config.jsonc`: entrada `"custom/ai-usage"` al principio de
+  `modules-right` + definición del módulo tras el array.
+- `~/.config/waybar/style.css`: bloque `#custom-ai-usage` neutro (usa
+  `alpha(@foreground, …)` del tema activo; warning/critical con hex propios
+  porque los temas de Omarchy solo exponen foreground/background).
+- `~/.config/hypr/hyprland.conf`: windowrule de la ventana flotante.
+
+Todo lo insertado va delimitado con marcadores `lazysubs-begin`/`lazysubs-end`
+(o `// lazysubs` en líneas sueltas); `uninstall` elimina exactamente eso y
+restaura el fichero byte a byte (hay test de round-trip). Ambos comandos son
+idempotentes, hacen backup `.bak.<epoch>` antes de escribir y recargan con
+`omarchy restart waybar` + `hyprctl reload` (+ `configerrors`). Si el config
+de waybar no tiene la estructura esperada, se imprime el snippet para
+instalación manual en vez de romper nada. Respeta `XDG_CONFIG_HOME` (útil
+para probar contra un directorio sandbox).
 
 ### Modos (main.rs)
 
 - Sin args + stdout es tty → **TUI**. Sin tty → `--json`. Así el mismo binario
   sirve para waybar (pipe) y para uso interactivo.
-- `tui` / `--tui`, `--json`, `--waybar`, `--no-cache`, `--ttl N` (defecto 60).
+- `tui` / `--tui`, `install`, `uninstall`, `--json`, `--waybar`, `--no-cache`,
+  `--ttl N` (defecto 60), `--signal N` (defecto 11), `--version`.
 
 ### Modelo de datos (providers/mod.rs)
 
