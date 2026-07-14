@@ -193,7 +193,11 @@ fn backup(path: &Path) -> Result<PathBuf> {
 
 fn write_with_backup(path: &Path, contents: &str) -> Result<()> {
     let bak = backup(path)?;
-    std::fs::write(path, contents).with_context(|| format!("no pude escribir {path:?}"))?;
+    // Escritura atómica: waybar vigila estos ficheros (reload_style_on_change)
+    // y el propio install reinicia servicios justo después; un write no
+    // atómico puede dejar que lean el fichero a medias.
+    crate::cache::atomic_save(path, contents.as_bytes())
+        .with_context(|| format!("no pude escribir {path:?}"))?;
     println!("  ✓ {} (backup: {})", path.display(), bak.display());
     Ok(())
 }
