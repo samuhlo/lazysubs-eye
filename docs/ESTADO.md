@@ -80,9 +80,12 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
   testada + probado end-to-end con un notify-send stub), y `--check` con
   exit codes 0/1/2/3 para scripts. Los umbrales ahora tienen una única
   fuente (config) en waybar, TUI, check y notificaciones.
-- **Fase D — v1.x**: providers de cuotas para Gemini CLI y OpenCode,
-  historial + sparklines (`~/.local/state/lazysubs-eye/`), coste estimado y
-  desglose por proyecto.
+- **Fases E — plan de producto** (2026-07-14): historial de gasto
+  semana/mes con SQLite + estadísticas (E1), cuenta visible y multicuenta
+  por IA (E2), y soporte de cualquier Linux con waybar, Omarchy primero
+  (E3). **Plan detallado con diseño y decisiones en
+  [PLAN-PRODUCTO.md](PLAN-PRODUCTO.md)** — sustituye a la antigua Fase D
+  (los providers de Gemini/OpenCode quedan como idea futura sin fase).
 - **Post-lanzamiento (2026-07-14, feedback del usuario)** ✓: fix del texto
   truncado "sin uso hoy" en el panel OpenCode (era una celda de tabla con
   columna de 10 chars; ahora es párrafo), degradación con datos previos ante

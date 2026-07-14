@@ -198,7 +198,10 @@ Internal docs are in Spanish:
 - [x] CI + release binaries (static musl) + AUR PKGBUILD
 - [x] Config file, threshold notifications (mako), `--check` for scripts
 - [x] MiniMax provider · graceful degradation on transient API errors
-- [ ] Quota providers for Gemini CLI and OpenCode, history + sparklines
+- [x] In-TUI settings panel · notification cooldown
+- [ ] Weekly/monthly usage history + stats (SQLite)
+- [ ] Account display + multi-account per provider
+- [ ] Any Linux with waybar (Omarchy-first)
 
 ## Contributing
 
