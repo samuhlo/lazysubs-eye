@@ -1,4 +1,4 @@
-# Estado del proyecto — 2026-07-13
+# Estado del proyecto — 2026-07-14
 
 Traspaso para continuar el desarrollo. Contexto completo del funcionamiento en
 [ARQUITECTURA.md](ARQUITECTURA.md).
@@ -6,9 +6,11 @@ Traspaso para continuar el desarrollo. Contexto completo del funcionamiento en
 ## Resumen
 
 lazysubs es un clon de CodexBar para Omarchy: muestra las cuotas de las
-suscripciones de IA (Claude Code, Codex) en waybar y en una TUI estilo lazygit.
-Las **fases 1–3 están completadas, integradas en el sistema del usuario y
-verificadas en vivo** con sus cuentas reales (Claude pro, Codex plus).
+suscripciones de IA (Claude Code, Codex) en waybar y en una TUI estilo lazygit,
+más los tokens consumidos hoy por modelo (Claude, Pi, OpenCode). Las fases 1–3
+están completadas, integradas en el sistema del usuario y verificadas en vivo
+con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
+**lanzarlo como producto para la comunidad Omarchy** (plan de fases A–D abajo).
 
 ## Hecho
 
@@ -24,34 +26,48 @@ verificadas en vivo** con sus cuentas reales (Claude pro, Codex plus).
   tokens de hoy por modelo, auto-refresh sin bloquear la UI, theming automático
   vía colores ANSI. Click izquierdo del módulo waybar la abre flotante
   (launch-or-focus).
+- **Créditos de reset de Codex** en el panel de la TUI (de
+  `rateLimitResetCredits`).
+- **Tokens diarios de Pi**: parseo incremental de los JSONL de
+  `~/.pi/agent/sessions` con índice persistente (fingerprint + offset).
+- **Tokens diarios de OpenCode**: lectura de la base SQLite de
+  `~/.local/state/opencode` (tablas `part`/`message`), con cursor incremental
+  y reconciliación diaria.
+- **Fase A de lanzamiento (parcial)**: LICENSE (MIT), `--version`, README en
+  inglés con quickstart y muestra de la TUI, docs actualizados.
 
 ## Estado del repo
 
-- Sin commits todavía — **el usuario decide cuándo commitear**; no commitear
-  sin que lo pida.
-- `cargo build` limpio, sin warnings. No hay tests automatizados aún.
+- Historia en `master`; el usuario decide cuándo commitear — **no commitear
+  sin que lo pida**.
+- `cargo build` limpio, sin warnings. **51 tests** (`cargo test`), todos verdes
+  (cubren sobre todo pi_tokens y opencode_tokens).
+- Los cambios grandes se especifican con openspec; los specs aplicados están
+  en `openspec/changes/archive/`.
 - Instalado en el sistema: ver tabla "Integración con el sistema" en
   ARQUITECTURA.md (waybar config, style.css, hyprland.conf y symlink en
   `~/.local/bin` — hay backups con timestamp `.bak.<epoch>` de los configs
   tocados).
 
-## Pendiente — Fase 4 (por orden de valor)
+## Plan de lanzamiento como producto Omarchy
 
-1. **Créditos de reset de Codex en la TUI**: ya vienen en la respuesta RPC
-   (`rateLimitResetCredits.availableCount`, hoy el usuario tiene 3). Solo hay
-   que añadirlos al modelo de datos y pintarlos en el panel de Codex.
-2. **Notificaciones**: `notify-send` (mako) al cruzar 80%/95% de una ventana.
-   Ojo: el binario se ejecuta cada 60s desde waybar sin estado entre runs —
-   guardar el último umbral notificado en la cache para no spamear.
-3. **Historial + sparklines**: persistir snapshots (p. ej. en la cache o un
-   sqlite/jsonl en `~/.local/state/lazysubs/`) y pintar sparklines de uso en
-   la TUI (ratatui tiene widget `Sparkline`).
-4. **Provider Gemini CLI**: instalado en `~/.local/bin/gemini`. Sin
-   investigar aún — mirar `~/.gemini/` y qué expone su CLI.
-5. **Provider opencode**: instalado; hay estado en `~/.local/state/opencode`.
-   Sin investigar aún.
-6. Ideas menores: coste estimado en la tabla de tokens (precios por modelo),
-   desglose por proyecto (el JSONL trae `cwd`), `--check` para scripts/hooks.
+- **Fase A — base lanzable**: LICENSE ✓, `--version` ✓, README inglés ✓,
+  docs al día ✓. Pendiente de la fase: captura PNG real de la TUI y del
+  módulo waybar para el README (no hay herramienta de captura instalada;
+  de momento hay una muestra en texto).
+- **Fase B — instalación en un comando**: subcomando `lazysubs install` /
+  `uninstall` (módulo waybar + CSS + windowrule, idempotente, backups
+  `.bak.<epoch>`, recarga), CSS por defecto neutro (sin la paleta personal),
+  señal RTMIN configurable, CI (fmt+clippy+test), release con binario
+  estático y PKGBUILD para AUR.
+- **Fase C — producto redondo**: `~/.config/lazysubs/config.toml` (umbrales,
+  TTL, providers, iconos), notificaciones 80%/95% vía notify-send con
+  anti-spam en la cache, `--check` para scripts.
+- **Fase D — v1.x**: providers de cuotas para Gemini CLI y OpenCode,
+  historial + sparklines (`~/.local/state/lazysubs/`), coste estimado y
+  desglose por proyecto.
+- **Decisión abierta**: idioma de la propia UI (hoy en español; el README ya
+  está en inglés). Decidir antes del anuncio público.
 
 ## Decisiones de diseño ya tomadas (respetar)
 
@@ -62,14 +78,16 @@ verificadas en vivo** con sus cuentas reales (Claude pro, Codex plus).
   un provider caído degrada a estado `error`, nunca rompe el output.
 - TUI con colores ANSI (nada de hex hardcodeado) para heredar el tema del
   terminal. En waybar sí hay hex de la paleta Carbon Vándalo del usuario
-  (amarillo `#FFCA40` como acento; regla del tema: nada de cian/azul fríos).
+  (amarillo `#FFCA40` como acento; regla del tema: nada de cian/azul fríos) —
+  para el producto, el CSS por defecto debe ser neutro (Fase B).
 - Umbrales: warning ≥80%, critical ≥95% (constantes en `output.rs`).
 - Estética: terminal/lazygit. El usuario quiere las cosas compactas (pidió
   bajar el font-size del módulo waybar a 10px).
 
 ## Preferencias del usuario relevantes
 
-- Habla español; UI y docs en español.
+- Habla español; docs internos en español. README público en inglés
+  (decidido el 2026-07-14).
 - Su tema Omarchy es Carbon Vándalo (suyo, github.com/samuhlo/carbon-vandal).
 - Sistema: CachyOS + Omarchy (Hyprland/waybar/alacritty), fish como shell,
   código en `~/Documentos/01_Code/`.

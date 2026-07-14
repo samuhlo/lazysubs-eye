@@ -1,44 +1,74 @@
 # lazysubs
 
-Monitor de cuotas de suscripciones de IA para Omarchy, al estilo lazygit.
-Muestra las ventanas de rate limit (sesión 5h, semanal…) de tus CLIs de IA
-en waybar y, próximamente, en una TUI.
+AI subscription quota monitor for [Omarchy](https://omarchy.org), lazygit-style.
+Shows the rate-limit windows (5h session, weekly…) of your AI CLIs in waybar
+and in a TUI, plus a per-model breakdown of the tokens you've burned today.
+
+```
+ lazysubs · cuotas de IA
+╭ ✳ Claude Code ─ pro ──────────────────────────────────────────────────────────╮
+│ 5h                73% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   → 3h06m │
+│ semana            36% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   → 5d21h │
+│ semana · Fable    59% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   → 5d21h │
+╰───────────────────────────────────────────────────────────────────────────────╯
+╭ ⬡ Codex ─ plus ───────────────────────────────────────────────────────────────╮
+│ semana            80% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   → 5d23h │
+│ Créditos de reinicio disponibles: 4                                           │
+╰───────────────────────────────────────────────────────────────────────────────╯
+╭ ✳ tokens hoy ─────────────────────────────────────────────────────────────────╮
+│ modelo                            req    in       out      cache→   cache+    │
+│ claude-fable-5                    34     17.7k    30.2k    777.9k   158.7k    │
+╰───────────────────────────────────────────────────────────────────────────────╯
+ q salir  r refrescar                                                  hace 59s
+```
+
+The TUI only uses ANSI colors, so it inherits your terminal theme (and thus
+the active Omarchy theme) with zero configuration.
 
 ## Providers
 
-| Provider | Fuente de datos | Requisito |
+| Provider | Data source | Requirement |
 |---|---|---|
-| Claude Code | endpoint OAuth `api.anthropic.com/api/oauth/usage` con el token de `~/.claude/.credentials.json` | sesión iniciada en Claude Code |
-| Codex | JSON-RPC de `codex app-server` (`account/rateLimits/read`) | `codex login` |
+| Claude Code | OAuth endpoint `api.anthropic.com/api/oauth/usage` with the token from `~/.claude/.credentials.json` | logged in to Claude Code |
+| Codex | JSON-RPC via `codex app-server` (`account/rateLimits/read`), including reset credits | `codex login` |
 
-Todo local: no se envía nada a terceros, solo se consultan las APIs oficiales
-de cada provider con tus propias credenciales. lazysubs **nunca refresca los
-tokens** (eso lo hace cada CLI); si un token caduca muestra un aviso de reauth.
+Daily token usage panels are also built from local data:
 
-## Uso
+| Panel | Data source |
+|---|---|
+| Claude tokens today | JSONL transcripts in `~/.claude/projects` |
+| Pi tokens today | session JSONL in `~/.pi/agent/sessions` |
+| OpenCode tokens today | OpenCode SQLite database in `~/.local/state/opencode` |
+
+Everything runs locally: nothing is sent to third parties — only the official
+API of each provider is queried with your own credentials. lazysubs **never
+refreshes OAuth tokens** (each CLI does that itself); if a token expires it
+shows a reauth notice.
+
+## Usage
 
 ```
-lazysubs            # TUI si stdout es una tty; si no, JSON
-lazysubs tui        # TUI explícita (q salir · r refrescar; auto-refresh 60s)
-lazysubs --json     # dump JSON completo del estado
-lazysubs --waybar   # JSON de una línea para un módulo custom de waybar
-lazysubs --no-cache # fuerza consulta fresca
-lazysubs --ttl 120  # validez de la cache (segundos, por defecto 60)
+lazysubs            # TUI if stdout is a tty; JSON otherwise
+lazysubs tui        # explicit TUI (q quit · r refresh; auto-refresh 60s)
+lazysubs --json     # full JSON dump of the state
+lazysubs --waybar   # single-line JSON for a custom waybar module
+lazysubs --no-cache # force a fresh query
+lazysubs --ttl 120  # cache validity (seconds, default 60)
+lazysubs --version  # print version
 ```
 
-La TUI usa colores ANSI, así que hereda el tema del terminal (y por tanto el
-tema activo de Omarchy) sin configuración. Incluye una tabla con los tokens
-consumidos hoy por modelo, sacados de los JSONL de `~/.claude/projects`.
+The cache lives in `~/.cache/lazysubs/status.json` (cached runs take ~5 ms,
+so waybar can poll every 60 s for free).
 
-La cache vive en `~/.cache/lazysubs/status.json`.
+## Installation
 
-## Instalación
+Requires Rust (an AUR package is planned):
 
 ```
 cargo install --path .
 ```
 
-## Waybar (Fase 2)
+## Waybar integration
 
 ```jsonc
 "custom/ai-usage": {
@@ -51,23 +81,33 @@ cargo install --path .
 }
 ```
 
-Clases CSS emitidas: `normal`, `warning` (≥80 %), `critical` (≥95 %), `error`.
-Refresco manual desde cualquier script: `pkill -RTMIN+11 waybar`.
-El `on-click` abre (o enfoca) la TUI en una terminal flotante. Requiere esta
-regla en `~/.config/hypr/hyprland.conf` para que la ventana flote centrada:
+Emitted CSS classes: `normal`, `warning` (≥80 %), `critical` (≥95 %), `error`.
+Manual refresh from any script: `pkill -RTMIN+11 waybar`.
+Left click opens (or focuses) the TUI in a floating terminal. That needs this
+rule in `~/.config/hypr/hyprland.conf` so the window floats centered:
 
 ```
 windowrule = tag +floating-window, match:class org.omarchy.lazysubs
 ```
 
-## Documentación
+## Documentation
 
-- [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md) — cómo funciona: estructura, fuentes de datos, cache, TUI e integración con el sistema.
-- [docs/ESTADO.md](docs/ESTADO.md) — estado del proyecto, decisiones tomadas y plan de la Fase 4 (traspaso para continuar el desarrollo).
+Internal docs are in Spanish:
+
+- [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md) — how it works: structure, data sources, cache, TUI and system integration.
+- [docs/ESTADO.md](docs/ESTADO.md) — project state, decisions taken and pending work.
 
 ## Roadmap
 
-- [x] Fase 1 — core collector + salidas `--json` / `--waybar`
-- [x] Fase 2 — integración waybar + ventana flotante en Hyprland
-- [x] Fase 3 — TUI (ratatui) con tema del terminal + tokens de hoy por modelo
-- [ ] Fase 4 — más providers (gemini, opencode), historial, notificaciones
+- [x] Phase 1 — core collector + `--json` / `--waybar` outputs
+- [x] Phase 2 — waybar integration + floating window on Hyprland
+- [x] Phase 3 — TUI (ratatui) with terminal theming + today's tokens per model
+- [x] Codex reset credits · daily tokens for Pi and OpenCode
+- [ ] `lazysubs install` / `uninstall` (one-command waybar + Hyprland setup)
+- [ ] CI + release binaries + AUR package
+- [ ] Config file, threshold notifications (mako), `--check` for scripts
+- [ ] Quota providers for Gemini CLI and OpenCode, history + sparklines
+
+## License
+
+[MIT](LICENSE)

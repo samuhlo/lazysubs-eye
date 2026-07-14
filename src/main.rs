@@ -20,6 +20,7 @@ Uso: lazysubs [tui|--json|--waybar] [--no-cache] [--ttl <segundos>]
   --waybar    JSON de una línea para un módulo custom de waybar
   --no-cache  fuerza una consulta fresca a los providers
   --ttl N     validez de la cache en segundos (por defecto 60)
+  --version   muestra la versión
 ";
 
 fn main() {
@@ -46,6 +47,10 @@ fn main() {
             }
             "-h" | "--help" => {
                 print!("{HELP}");
+                return;
+            }
+            "-V" | "--version" => {
+                println!("lazysubs {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             other => {
