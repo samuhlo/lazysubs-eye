@@ -69,10 +69,10 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
   estático musl al taggear `v*` (`release.yml`) y PKGBUILD de `lazysubs-eye-bin`
   en `packaging/aur/`. Repo creado y release `v0.2.0` publicada (CI y build
   musl en verde; sha256 real ya en el PKGBUILD). Pendiente: publicar el
-  PKGBUILD en AUR (requiere cuenta AUR del usuario) y migrar la integración
-  manual del sistema del usuario, que aún apunta al binario viejo `lazysubs`
-  (`lazysubs-eye install` la detectaría como ajena: hay que quitar la vieja
-  a mano o con el binario antiguo y luego instalar la nueva).
+  PKGBUILD en AUR (requiere cuenta AUR del usuario). El sistema del usuario
+  ya está migrado (2026-07-14): binario viejo desinstalado, integración
+  manual retirada con backups y `lazysubs-eye install` ejecutado (módulo con
+  marcadores, CSS personal del usuario conservado, windowrule nueva).
 - **Fase C — producto redondo** ✓ (2026-07-14): `~/.config/lazysubs-eye/
   config.toml` (ttl, umbrales, notifications, providers on/off, iconos;
   módulo `config.rs` con OnceLock), notificaciones de umbral vía notify-send
