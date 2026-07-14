@@ -11,6 +11,12 @@ fn cache_dir() -> PathBuf {
     base.join("lazysubs-eye")
 }
 
+/// Directorio de cache compartido (status, índices de tokens, estado de
+/// notificaciones).
+pub fn dir() -> PathBuf {
+    cache_dir()
+}
+
 fn cache_file() -> PathBuf {
     cache_dir().join("status.json")
 }

@@ -1,8 +1,6 @@
+use crate::config;
 use crate::providers::Status;
 use serde_json::json;
-
-const WARNING_AT: f64 = 80.0;
-const CRITICAL_AT: f64 = 95.0;
 
 pub fn countdown(resets_at: i64) -> String {
     let secs = resets_at - chrono::Utc::now().timestamp();
@@ -20,9 +18,10 @@ pub fn countdown(resets_at: i64) -> String {
 }
 
 fn class_for(percent: f64) -> &'static str {
-    if percent >= CRITICAL_AT {
+    let config = config::get();
+    if percent >= config.critical_at {
         "critical"
-    } else if percent >= WARNING_AT {
+    } else if percent >= config.warning_at {
         "warning"
     } else {
         "normal"

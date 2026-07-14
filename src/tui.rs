@@ -18,7 +18,6 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 const AUTO_REFRESH: Duration = Duration::from_secs(60);
-const CACHE_TTL_SECS: i64 = 60;
 
 const ACCENT: Color = Color::Yellow;
 const DIM: Color = Color::DarkGray;
@@ -80,11 +79,12 @@ impl App {
             let status = if force {
                 None
             } else {
-                cache::load(CACHE_TTL_SECS)
+                cache::load(crate::config::get().ttl)
             }
             .unwrap_or_else(|| {
                 let fresh = providers::collect_all();
                 cache::save(&fresh);
+                crate::notify::check(&fresh);
                 fresh
             });
             let _ = tx.send(Update::Status(status));
@@ -455,9 +455,10 @@ fn bordered<'a>(title: impl Into<std::borrow::Cow<'a, str>>) -> Block<'a> {
 }
 
 fn percent_color(pct: f64) -> Color {
-    if pct >= 95.0 {
+    let config = crate::config::get();
+    if pct >= config.critical_at {
         Color::Red
-    } else if pct >= 80.0 {
+    } else if pct >= config.warning_at {
         Color::Yellow
     } else {
         Color::Green

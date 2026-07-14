@@ -15,10 +15,38 @@ src/
 │   └── codex.rs       # collector de Codex (JSON-RPC a `codex app-server`)
 ├── tokens.rs          # tokens de hoy por modelo (parseo de JSONL locales de Claude)
 ├── cache.rs           # cache JSON con TTL en ~/.cache/lazysubs-eye/status.json
+├── config.rs          # config opcional (~/.config/lazysubs-eye/config.toml)
+├── notify.rs          # notificaciones de umbral vía notify-send con anti-spam
 ├── output.rs          # render --waybar y --json + countdown() + umbrales de color
 ├── install.rs         # subcomandos install/uninstall (waybar + hyprland)
 └── tui.rs             # TUI ratatui (gauges, countdowns, tabla de tokens)
 ```
+
+### Config (config.rs)
+
+TOML opcional en `~/.config/lazysubs-eye/config.toml`: `ttl`, `warning_at`,
+`critical_at`, `notifications`, `[providers]` (on/off) e `[icons]`
+(overrides). Global vía `config::get()` (OnceLock, una sola lectura); en
+tests devuelve siempre los defaults para que la config del usuario no afecte.
+Config inválida → aviso por stderr + defaults, nunca rompe el output. Los
+umbrales alimentan la clase CSS de waybar, los colores de gauge de la TUI,
+`--check` y las notificaciones (única fuente: ya no hay literales duplicados).
+
+### Notificaciones (notify.rs)
+
+Tras cada consulta fresca (waybar corre el binario sin estado cada 60s) se
+compara cada ventana con los umbrales y se lanza `notify-send` (urgency
+normal/critical) solo al **subir** de nivel. El último nivel notificado por
+ventana persiste en `~/.cache/lazysubs-eye/notify-state.json`; se rearma si
+la ventana cambia de `resets_at` (reset) o baja del umbral. Un provider en
+error conserva su estado previo (no re-notifica al recuperarse). La lógica
+está en `plan()` (pura, testada); el envío en `send()`.
+
+### --check (main.rs)
+
+Para scripts/hooks: imprime una línea por hallazgo y sale con el peor nivel:
+0 ok · 1 warning · 2 critical · 3 error de provider (prioridad por máximo,
+como la clase de waybar). Usa la cache como el resto de modos.
 
 ### install / uninstall (install.rs)
 

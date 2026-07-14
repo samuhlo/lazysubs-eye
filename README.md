@@ -54,6 +54,7 @@ lazysubs-eye install    # wire up waybar + Hyprland (idempotent, with backups)
 lazysubs-eye uninstall  # revert the integration
 lazysubs-eye --json     # full JSON dump of the state
 lazysubs-eye --waybar   # single-line JSON for a custom waybar module
+lazysubs-eye --check    # summary + exit code: 0 ok, 1 warning, 2 critical, 3 error
 lazysubs-eye --no-cache # force a fresh query
 lazysubs-eye --ttl 120  # cache validity (seconds, default 60)
 lazysubs-eye --signal 8 # RTMIN+N signal for the waybar module (install, default 11)
@@ -62,6 +63,39 @@ lazysubs-eye --version  # print version
 
 The cache lives in `~/.cache/lazysubs-eye/status.json` (cached runs take ~5 ms,
 so waybar can poll every 60 s for free).
+
+`--check` is made for scripts and hooks, e.g. warn before starting a long
+agent session: `lazysubs-eye --check || echo "quota running low"`.
+
+## Configuration
+
+Optional, at `~/.config/lazysubs-eye/config.toml`. Every field has a default;
+an invalid file never breaks the output (it warns on stderr and falls back to
+defaults):
+
+```toml
+ttl = 60             # cache validity in seconds (--ttl overrides)
+warning_at = 80.0    # thresholds in % — drive the waybar CSS class,
+critical_at = 95.0   # the TUI gauge colors, --check and notifications
+notifications = true # desktop notifications via notify-send (mako)
+
+[providers]          # disable a provider even if its CLI is logged in
+claude = true
+codex = true
+
+[icons]              # override the waybar/TUI icons
+claude = "✳"
+codex = "⬡"
+```
+
+### Notifications
+
+On every fresh query (waybar polls each minute) lazysubs-eye compares each
+rate-limit window against the thresholds and sends a desktop notification via
+`notify-send` when a window *crosses* into warning (normal urgency) or
+critical (critical urgency). It only notifies on level changes — state is kept
+in `~/.cache/lazysubs-eye/notify-state.json`, re-arming when the window resets
+or drops back below the threshold — so it never spams.
 
 ## Installation
 
@@ -123,7 +157,7 @@ Internal docs are in Spanish:
 - [x] Codex reset credits · daily tokens for Pi and OpenCode
 - [x] `lazysubs-eye install` / `uninstall` (one-command waybar + Hyprland setup)
 - [x] CI + release binaries (static musl) + AUR PKGBUILD
-- [ ] Config file, threshold notifications (mako), `--check` for scripts
+- [x] Config file, threshold notifications (mako), `--check` for scripts
 - [ ] Quota providers for Gemini CLI and OpenCode, history + sparklines
 
 ## License

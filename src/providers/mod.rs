@@ -55,19 +55,31 @@ pub struct Status {
 }
 
 pub fn collect_all() -> Status {
+    let config = crate::config::get();
     let mut providers = Vec::new();
 
-    if claude::available() {
+    if config.providers.claude && claude::available() {
         providers.push(
             claude::collect()
                 .unwrap_or_else(|e| ProviderStatus::err("claude", "Claude Code", claude::ICON, e)),
         );
     }
-    if codex::available() {
+    if config.providers.codex && codex::available() {
         providers.push(
             codex::collect()
                 .unwrap_or_else(|e| ProviderStatus::err("codex", "Codex", codex::ICON, e)),
         );
+    }
+
+    for provider in &mut providers {
+        let icon = match provider.id.as_str() {
+            "claude" => config.icons.claude.as_ref(),
+            "codex" => config.icons.codex.as_ref(),
+            _ => None,
+        };
+        if let Some(icon) = icon {
+            provider.icon = icon.clone();
+        }
     }
 
     Status {

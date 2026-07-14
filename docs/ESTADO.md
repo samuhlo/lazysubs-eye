@@ -73,9 +73,13 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
   manual del sistema del usuario, que aún apunta al binario viejo `lazysubs`
   (`lazysubs-eye install` la detectaría como ajena: hay que quitar la vieja
   a mano o con el binario antiguo y luego instalar la nueva).
-- **Fase C — producto redondo**: `~/.config/lazysubs-eye/config.toml` (umbrales,
-  TTL, providers, iconos), notificaciones 80%/95% vía notify-send con
-  anti-spam en la cache, `--check` para scripts.
+- **Fase C — producto redondo** ✓ (2026-07-14): `~/.config/lazysubs-eye/
+  config.toml` (ttl, umbrales, notifications, providers on/off, iconos;
+  módulo `config.rs` con OnceLock), notificaciones de umbral vía notify-send
+  con anti-spam persistido en `notify-state.json` (`notify.rs`, lógica pura
+  testada + probado end-to-end con un notify-send stub), y `--check` con
+  exit codes 0/1/2/3 para scripts. Los umbrales ahora tienen una única
+  fuente (config) en waybar, TUI, check y notificaciones.
 - **Fase D — v1.x**: providers de cuotas para Gemini CLI y OpenCode,
   historial + sparklines (`~/.local/state/lazysubs-eye/`), coste estimado y
   desglose por proyecto.
