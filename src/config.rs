@@ -4,9 +4,11 @@
 //! config. Un fichero inválido nunca rompe el output: se avisa por stderr y
 //! se usan los defaults.
 
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::RwLock;
+use toml_edit::{value, DocumentMut};
 
 #[derive(Deserialize, Debug, Clone, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -157,17 +159,140 @@ fn load() -> Config {
     }
 }
 
-/// Config global, cargada una sola vez. En tests devuelve los defaults para
-/// que la config del usuario no afecte a los resultados.
-pub fn get() -> &'static Config {
-    static CONFIG: OnceLock<Config> = OnceLock::new();
-    CONFIG.get_or_init(|| {
-        if cfg!(test) {
-            Config::default()
-        } else {
-            load()
+static CONFIG: RwLock<Option<Config>> = RwLock::new(None);
+
+/// Config global, cargada del fichero la primera vez y actualizable en
+/// caliente desde el panel de opciones de la TUI. En tests devuelve los
+/// defaults para que la config del usuario no afecte a los resultados.
+pub fn get() -> Config {
+    if let Some(config) = CONFIG.read().unwrap().as_ref() {
+        return config.clone();
+    }
+    let loaded = if cfg!(test) {
+        Config::default()
+    } else {
+        load()
+    };
+    *CONFIG.write().unwrap() = Some(loaded.clone());
+    loaded
+}
+
+/// Sustituye la config en memoria (panel de opciones de la TUI).
+pub fn set(config: Config) {
+    *CONFIG.write().unwrap() = Some(config);
+}
+
+/// Añade o quita un id de una lista de superficie. `None` significa "todos",
+/// así que al primer cambio se materializa la lista completa.
+pub fn toggle_id(list: &mut Option<Vec<String>>, all: &[&str], id: &str) {
+    let mut current: Vec<String> = match list {
+        None => all.iter().map(|s| s.to_string()).collect(),
+        Some(v) => v.clone(),
+    };
+    match current.iter().position(|x| x == id) {
+        Some(at) => {
+            current.remove(at);
         }
-    })
+        None => current.push(id.to_string()),
+    }
+    *list = Some(current);
+}
+
+/// Persiste en config.toml los campos editables desde la TUI, conservando
+/// comentarios y claves que no gestionamos (p. ej. [minimax] api_key). Solo
+/// se escriben claves que difieren del default o que ya existían.
+pub fn persist(config: &Config) -> Result<()> {
+    let path = config_file().context("sin HOME ni XDG_CONFIG_HOME")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc: DocumentMut = text
+        .parse()
+        .with_context(|| format!("config.toml existente inválido, no lo toco: {path:?}"))?;
+    apply_to_doc(&mut doc, config);
+    crate::cache::atomic_save(&path, doc.to_string().as_bytes())
+        .with_context(|| format!("no pude escribir {path:?}"))?;
+    Ok(())
+}
+
+/// Vuelca en el documento TOML los campos editables desde la TUI. Separado de
+/// persist() para poder testearlo sin tocar el filesystem.
+fn apply_to_doc(doc: &mut DocumentMut, config: &Config) {
+    let defaults = Config::default();
+
+    fn set_if(doc: &mut DocumentMut, key: &str, differs: bool, v: toml_edit::Value) {
+        if differs || doc.contains_key(key) {
+            doc[key] = value(v);
+        }
+    }
+    set_if(doc, "ttl", config.ttl != defaults.ttl, config.ttl.into());
+    set_if(
+        doc,
+        "warning_at",
+        config.warning_at != defaults.warning_at,
+        config.warning_at.into(),
+    );
+    set_if(
+        doc,
+        "critical_at",
+        config.critical_at != defaults.critical_at,
+        config.critical_at.into(),
+    );
+    set_if(
+        doc,
+        "notifications",
+        config.notifications != defaults.notifications,
+        config.notifications.into(),
+    );
+    set_if(
+        doc,
+        "colors",
+        config.colors != defaults.colors,
+        config.colors.into(),
+    );
+
+    let any_provider_off =
+        !(config.providers.claude && config.providers.codex && config.providers.minimax);
+    if any_provider_off || doc.contains_key("providers") {
+        let table = ensure_table(doc, "providers");
+        table["claude"] = value(config.providers.claude);
+        table["codex"] = value(config.providers.codex);
+        table["minimax"] = value(config.providers.minimax);
+    }
+
+    set_list(doc, "waybar", "providers", &config.waybar.providers);
+    if let Some(percent) = config.waybar.percent {
+        ensure_table(doc, "waybar")["percent"] = value(percent);
+    }
+    set_list(doc, "tui", "providers", &config.tui.providers);
+    set_list(doc, "tui", "panels", &config.tui.panels);
+}
+
+/// Tabla explícita (`[nombre]` al final del fichero), nunca inline: toml_edit
+/// crearía `nombre = { … }` en la primera línea, delante de los comentarios.
+fn ensure_table<'a>(doc: &'a mut DocumentMut, name: &str) -> &'a mut toml_edit::Table {
+    if !doc.contains_key(name) || doc[name].as_table().is_none() {
+        doc[name] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    doc[name].as_table_mut().expect("recién insertada")
+}
+
+fn set_list(doc: &mut DocumentMut, table: &str, key: &str, list: &Option<Vec<String>>) {
+    match list {
+        Some(items) => {
+            let mut array = toml_edit::Array::new();
+            for item in items {
+                array.push(item.as_str());
+            }
+            ensure_table(doc, table)[key] = value(array);
+        }
+        None => {
+            if let Some(t) = doc.get_mut(table).and_then(|i| i.as_table_mut()) {
+                t.remove(key);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -237,5 +362,66 @@ panels = ["claude_tokens"]
     #[test]
     fn clave_desconocida_es_error() {
         assert!(toml::from_str::<Config>("ttll = 60").is_err());
+    }
+
+    #[test]
+    fn toggle_id_materializa_quita_y_pone() {
+        let all = ["a", "b", "c"];
+        let mut list = None;
+        toggle_id(&mut list, &all, "b");
+        assert_eq!(list, Some(vec!["a".to_string(), "c".to_string()]));
+        toggle_id(&mut list, &all, "b");
+        assert_eq!(
+            list,
+            Some(vec!["a".to_string(), "c".to_string(), "b".to_string()])
+        );
+    }
+
+    #[test]
+    fn apply_to_doc_conserva_comentarios_y_claves_ajenas() {
+        let original = "\
+# mi comentario importante
+# ttl = 60
+
+[minimax]
+api_key = \"sk-secreta\"  # no tocar
+";
+        let mut doc: DocumentMut = original.parse().unwrap();
+        let config = Config {
+            notifications: false,
+            tui: Tui {
+                panels: Some(vec!["claude_tokens".into()]),
+                ..Tui::default()
+            },
+            ..Config::default()
+        };
+        apply_to_doc(&mut doc, &config);
+        let out = doc.to_string();
+
+        assert!(out.contains("# mi comentario importante"));
+        assert!(out.contains("# ttl = 60"), "comentarios intactos");
+        assert!(
+            out.contains("api_key = \"sk-secreta\""),
+            "clave ajena intacta"
+        );
+        assert!(out.contains("notifications = false"));
+        assert!(out.contains("panels = [\"claude_tokens\"]"));
+        assert!(out.contains("[tui]"), "tabla explícita, no inline: {out}");
+        // lo que sigue en default y no estaba, no se añade
+        assert!(!out.contains("warning_at"));
+        assert!(!out.contains("[providers]"));
+
+        // el resultado se puede volver a cargar
+        let reloaded: Config = toml::from_str(&out).unwrap();
+        assert!(!reloaded.notifications);
+        assert!(reloaded.tui.panel("claude_tokens"));
+        assert!(!reloaded.tui.panel("pi_tokens"));
+    }
+
+    #[test]
+    fn apply_to_doc_vuelve_al_default_actualizando_la_clave_existente() {
+        let mut doc: DocumentMut = "notifications = false\n".parse().unwrap();
+        apply_to_doc(&mut doc, &Config::default());
+        assert!(doc.to_string().contains("notifications = true"));
     }
 }

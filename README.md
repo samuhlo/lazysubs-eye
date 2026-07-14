@@ -54,7 +54,7 @@ shows a reauth notice.
 
 ```
 lazysubs-eye            # TUI if stdout is a tty; JSON otherwise
-lazysubs-eye tui        # explicit TUI (q quit · r refresh; auto-refresh 60s)
+lazysubs-eye tui        # explicit TUI (q quit · r refresh · o settings; auto-refresh 60s)
 lazysubs-eye install    # wire up waybar + Hyprland (idempotent, with backups)
 lazysubs-eye uninstall  # revert the integration
 lazysubs-eye --json     # full JSON dump of the state
@@ -113,6 +113,14 @@ api_key = "..."      # or the MINIMAX_API_KEY env var
 per surface — e.g. keep the bar minimal with one provider while the TUI shows
 everything. Hidden providers don't drive the bar's CSS class either. `[tui]
 panels` toggles the daily-token panels (disabled panels aren't even scanned).
+
+### In-TUI settings
+
+Press `o` in the TUI to edit everything above interactively: arrow keys to
+move, space to toggle, `←`/`→` to adjust thresholds and TTL. Changes apply
+live (the bar picks them up on its next poll) and are written back to
+`config.toml` preserving your comments and any keys the panel doesn't manage
+(like the MiniMax `api_key`).
 
 ### Notifications
 

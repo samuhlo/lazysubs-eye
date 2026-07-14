@@ -44,7 +44,7 @@ fn class_for(percent: f64, config: &config::Config) -> &'static str {
 }
 
 pub fn waybar(status: &Status) -> String {
-    waybar_with(status, config::get())
+    waybar_with(status, &config::get())
 }
 
 fn waybar_with(status: &Status, config: &config::Config) -> String {

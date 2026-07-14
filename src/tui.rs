@@ -12,7 +12,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, LineGauge, Padding, Paragraph, Row, Table};
+use ratatui::widgets::{Block, BorderType, Clear, LineGauge, Padding, Paragraph, Row, Table};
 use ratatui::Frame;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -48,6 +48,65 @@ struct App {
     pi_tokens_scanning: bool,
     opencode_scanning: bool,
     last_refresh: Instant,
+    /// Cursor del panel de opciones; None = cerrado.
+    settings_cursor: Option<usize>,
+    settings_error: Option<String>,
+}
+
+/// Ítems del panel de opciones. Los índices apuntan a PROVIDERS / PANELS.
+#[derive(Clone, Copy, PartialEq)]
+enum Setting {
+    Section(&'static str),
+    Notifications,
+    Colors,
+    WarningAt,
+    CriticalAt,
+    Ttl,
+    Provider(usize),
+    WaybarPercent,
+    WaybarProvider(usize),
+    TuiProvider(usize),
+    TuiPanel(usize),
+}
+
+const PROVIDERS: [(&str, &str); 3] = [
+    ("claude", "Claude Code"),
+    ("codex", "Codex"),
+    ("minimax", "MiniMax"),
+];
+const PANELS: [(&str, &str); 3] = [
+    ("claude_tokens", "tokens Claude"),
+    ("pi_tokens", "tokens Pi"),
+    ("opencode_tokens", "tokens OpenCode"),
+];
+const PROVIDER_IDS: [&str; 3] = ["claude", "codex", "minimax"];
+const PANEL_IDS: [&str; 3] = ["claude_tokens", "pi_tokens", "opencode_tokens"];
+
+fn settings_items() -> Vec<Setting> {
+    let mut items = vec![
+        Setting::Section("general"),
+        Setting::Notifications,
+        Setting::Colors,
+        Setting::WarningAt,
+        Setting::CriticalAt,
+        Setting::Ttl,
+        Setting::Section("providers"),
+    ];
+    items.extend((0..PROVIDERS.len()).map(Setting::Provider));
+    items.push(Setting::Section("waybar"));
+    items.push(Setting::WaybarPercent);
+    items.extend((0..PROVIDERS.len()).map(Setting::WaybarProvider));
+    items.push(Setting::Section("tui"));
+    items.extend((0..PROVIDERS.len()).map(Setting::TuiProvider));
+    items.extend((0..PANELS.len()).map(Setting::TuiPanel));
+    items
+}
+
+fn in_list(list: &Option<Vec<String>>, id: &str) -> bool {
+    match list {
+        None => true,
+        Some(items) => items.iter().any(|x| x == id),
+    }
 }
 
 impl App {
@@ -65,6 +124,72 @@ impl App {
             pi_tokens_scanning: false,
             opencode_scanning: false,
             last_refresh: Instant::now(),
+            settings_cursor: None,
+            settings_error: None,
+        }
+    }
+
+    fn settings_move(&mut self, delta: i64) {
+        let items = settings_items();
+        let Some(mut cursor) = self.settings_cursor else {
+            return;
+        };
+        loop {
+            cursor = (cursor as i64 + delta).rem_euclid(items.len() as i64) as usize;
+            if !matches!(items[cursor], Setting::Section(_)) {
+                break;
+            }
+        }
+        self.settings_cursor = Some(cursor);
+    }
+
+    /// Aplica un cambio: `dir` 0 = toggle (espacio/enter), ±1 = ajustar (←/→).
+    fn settings_apply(&mut self, dir: i64) {
+        let items = settings_items();
+        let Some(cursor) = self.settings_cursor else {
+            return;
+        };
+        let mut config = crate::config::get();
+        match items[cursor] {
+            Setting::Section(_) => return,
+            Setting::Notifications => config.notifications = !config.notifications,
+            Setting::Colors => config.colors = !config.colors,
+            Setting::WarningAt if dir != 0 => {
+                config.warning_at = (config.warning_at + 5.0 * dir as f64).clamp(5.0, 100.0)
+            }
+            Setting::CriticalAt if dir != 0 => {
+                config.critical_at = (config.critical_at + 5.0 * dir as f64).clamp(5.0, 100.0)
+            }
+            Setting::Ttl if dir != 0 => config.ttl = (config.ttl + 30 * dir).clamp(10, 3600),
+            Setting::WarningAt | Setting::CriticalAt | Setting::Ttl => return,
+            Setting::Provider(i) => {
+                let flag = match PROVIDER_IDS[i] {
+                    "claude" => &mut config.providers.claude,
+                    "codex" => &mut config.providers.codex,
+                    _ => &mut config.providers.minimax,
+                };
+                *flag = !*flag;
+            }
+            Setting::WaybarPercent => config.waybar.percent = Some(!config.waybar.percent()),
+            Setting::WaybarProvider(i) => crate::config::toggle_id(
+                &mut config.waybar.providers,
+                &PROVIDER_IDS,
+                PROVIDER_IDS[i],
+            ),
+            Setting::TuiProvider(i) => {
+                crate::config::toggle_id(&mut config.tui.providers, &PROVIDER_IDS, PROVIDER_IDS[i])
+            }
+            Setting::TuiPanel(i) => {
+                crate::config::toggle_id(&mut config.tui.panels, &PANEL_IDS, PANEL_IDS[i])
+            }
+        }
+        crate::config::set(config.clone());
+        self.settings_error = crate::config::persist(&config)
+            .err()
+            .map(|e| format!("{e:#}"));
+        // Un panel recién activado necesita su escaneo; refresh barato (cache).
+        if matches!(items[cursor], Setting::TuiPanel(_)) {
+            self.refresh(false);
         }
     }
 
@@ -174,10 +299,25 @@ impl App {
             if event::poll(Duration::from_millis(200))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
-                        match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                            KeyCode::Char('r') => self.refresh(true),
-                            _ => {}
+                        if self.settings_cursor.is_some() {
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Char('o') | KeyCode::Esc => {
+                                    self.settings_cursor = None
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => self.settings_move(-1),
+                                KeyCode::Down | KeyCode::Char('j') => self.settings_move(1),
+                                KeyCode::Char(' ') | KeyCode::Enter => self.settings_apply(0),
+                                KeyCode::Left | KeyCode::Char('h') => self.settings_apply(-1),
+                                KeyCode::Right | KeyCode::Char('l') => self.settings_apply(1),
+                                _ => {}
+                            }
+                        } else {
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                                KeyCode::Char('r') => self.refresh(true),
+                                KeyCode::Char('o') => self.settings_cursor = Some(1),
+                                _ => {}
+                            }
                         }
                     }
                 }
@@ -241,6 +381,61 @@ impl App {
             self.draw_opencode_tokens(f, areas[section]);
         }
         self.draw_footer(f, areas[areas.len() - 1], status);
+        if self.settings_cursor.is_some() {
+            self.draw_settings(f);
+        }
+    }
+
+    fn draw_settings(&self, f: &mut Frame) {
+        let items = settings_items();
+        let config = crate::config::get();
+        let cursor = self.settings_cursor.unwrap_or(1);
+
+        let extra = if self.settings_error.is_some() { 1 } else { 0 };
+        let height = (items.len() as u16 + 2 + extra).min(f.area().height.saturating_sub(2));
+        let width = 46.min(f.area().width.saturating_sub(2));
+        let area = Rect {
+            x: (f.area().width.saturating_sub(width)) / 2,
+            y: (f.area().height.saturating_sub(height)) / 2,
+            width,
+            height,
+        };
+        f.render_widget(Clear, area);
+
+        // Ventana visible con scroll alrededor del cursor si no cabe todo.
+        let inner_rows = (height - 2 - extra) as usize;
+        let offset = cursor.saturating_sub(inner_rows.saturating_sub(1));
+        let mut lines: Vec<Line> = Vec::new();
+        for (i, item) in items.iter().enumerate().skip(offset).take(inner_rows) {
+            let selected = i == cursor;
+            let line = match item {
+                Setting::Section(name) => {
+                    Line::from(Span::styled(format!("── {name} "), Style::new().fg(DIM)))
+                }
+                _ => {
+                    let (label, val) = setting_row(item, &config);
+                    let style = if selected {
+                        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::new()
+                    };
+                    Line::from(Span::styled(format!(" {val} {label}"), style))
+                }
+            };
+            lines.push(line);
+        }
+        if let Some(err) = &self.settings_error {
+            lines.push(Line::from(Span::styled(
+                format!(" ⚠ {err}"),
+                Style::new().fg(Color::Red),
+            )));
+        }
+
+        let block = bordered(" opciones ").title_bottom(Span::styled(
+            " ␣ cambiar · ←→ ajustar · o cerrar ",
+            Style::new().fg(DIM),
+        ));
+        f.render_widget(Paragraph::new(lines).block(block), area);
     }
 
     fn draw_header(&self, f: &mut Frame, area: Rect) {
@@ -389,7 +584,9 @@ impl App {
                 Span::styled(" q ", Style::new().fg(ACCENT)),
                 Span::styled("salir  ", Style::new().fg(DIM)),
                 Span::styled("r ", Style::new().fg(ACCENT)),
-                Span::styled("refrescar", Style::new().fg(DIM)),
+                Span::styled("refrescar  ", Style::new().fg(DIM)),
+                Span::styled("o ", Style::new().fg(ACCENT)),
+                Span::styled("opciones", Style::new().fg(DIM)),
             ])),
             left,
         );
@@ -476,6 +673,50 @@ fn bordered<'a>(title: impl Into<std::borrow::Cow<'a, str>>) -> Block<'a> {
             title,
             Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
         ))
+}
+
+/// Etiqueta y valor pintable de un ajuste ("[x]" para toggles, el número
+/// para los ajustables con ←/→).
+fn setting_row(item: &Setting, config: &crate::config::Config) -> (String, String) {
+    let check = |on: bool| if on { "[x]" } else { "[ ]" }.to_string();
+    match item {
+        Setting::Section(_) => (String::new(), String::new()),
+        Setting::Notifications => ("notificaciones".into(), check(config.notifications)),
+        Setting::Colors => ("colores de umbral".into(), check(config.colors)),
+        Setting::WarningAt => (
+            "umbral warning".into(),
+            format!("◂{:>3.0}%▸", config.warning_at),
+        ),
+        Setting::CriticalAt => (
+            "umbral critical".into(),
+            format!("◂{:>3.0}%▸", config.critical_at),
+        ),
+        Setting::Ttl => ("cache ttl (s)".into(), format!("◂{:>4}▸", config.ttl)),
+        Setting::Provider(i) => {
+            let on = match PROVIDER_IDS[*i] {
+                "claude" => config.providers.claude,
+                "codex" => config.providers.codex,
+                _ => config.providers.minimax,
+            };
+            (PROVIDERS[*i].1.into(), check(on))
+        }
+        Setting::WaybarPercent => (
+            "porcentaje en la barra".into(),
+            check(config.waybar.percent()),
+        ),
+        Setting::WaybarProvider(i) => (
+            PROVIDERS[*i].1.into(),
+            check(in_list(&config.waybar.providers, PROVIDER_IDS[*i])),
+        ),
+        Setting::TuiProvider(i) => (
+            PROVIDERS[*i].1.into(),
+            check(in_list(&config.tui.providers, PROVIDER_IDS[*i])),
+        ),
+        Setting::TuiPanel(i) => (
+            PANELS[*i].1.into(),
+            check(in_list(&config.tui.panels, PANEL_IDS[*i])),
+        ),
+    }
 }
 
 fn percent_color(pct: f64) -> Color {

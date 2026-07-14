@@ -98,6 +98,13 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
   iconos), `[tui] panels` para los paneles de tokens (apagados ni se
   escanean) y `colors = false` global (sin semáforo; la clase `error` se
   mantiene).
+- **Panel de opciones en la TUI (2026-07-14)** ✓: tecla `o` abre un overlay
+  con todos los ajustes (toggles + ←/→ para umbrales/ttl). Los cambios se
+  aplican en caliente (config global pasó de OnceLock a RwLock;
+  `config::get()` ahora devuelve un clon) y se persisten con toml_edit
+  conservando comentarios y claves ajenas (`config::persist` +
+  `apply_to_doc`, testado). Las tablas nuevas se escriben explícitas
+  (`ensure_table`), nunca inline.
 - **Decisión abierta**: idioma de la propia UI (hoy en español; el README ya
   está en inglés). Decidir antes del anuncio público.
 
