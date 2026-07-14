@@ -38,10 +38,16 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
 
 ## Estado del repo
 
-- Historia en `master`; el usuario decide cuándo commitear — **no commitear
-  sin que lo pida**.
-- `cargo build` limpio, sin warnings. **51 tests** (`cargo test`), todos verdes
-  (cubren sobre todo pi_tokens y opencode_tokens).
+- Publicado en `github.com/samuhlo/lazysubs-eye` (rama `main`); release
+  `v0.2.0` con binario estático musl. El proyecto se llamó `lazysubs` hasta
+  el 2026-07-14 (renombrado porque el nombre estaba pillado); el directorio
+  local sigue siendo `~/Documentos/01_Code/lazysubs`.
+- El usuario decide cuándo commitear — **no commitear sin que lo pida**.
+  **Nada de atribución a Claude/IA en commits ni en el repo**: todo va a
+  nombre del usuario (el historial se reescribió el 2026-07-14 para quitar
+  los Co-Authored-By).
+- `cargo build` limpio, sin warnings. **59 tests** (`cargo test`), todos
+  verdes (pi_tokens, opencode_tokens, cache e install).
 - Los cambios grandes se especifican con openspec; los specs aplicados están
   en `openspec/changes/archive/`.
 - Instalado en el sistema: ver tabla "Integración con el sistema" en
@@ -61,12 +67,12 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
   recarga; ver ARQUITECTURA.md § install), `--signal N` configurable, CI
   (fmt+clippy+test en `.github/workflows/ci.yml`), release con binario
   estático musl al taggear `v*` (`release.yml`) y PKGBUILD de `lazysubs-eye-bin`
-  en `packaging/aur/`. Pendiente de la fase: crear el repo en GitHub
-  (previsto `github.com/samuhlo/lazysubs-eye`, referenciado en el PKGBUILD),
-  validar el primer build musl en CI, rellenar el sha256 del PKGBUILD con la
-  primera release y publicarlo en AUR. El `install` no se ha ejecutado
-  contra el sistema del usuario (su integración manual sigue intacta; el
-  ciclo completo está validado en sandbox y con tests de round-trip).
+  en `packaging/aur/`. Repo creado y release `v0.2.0` publicada (CI y build
+  musl en verde; sha256 real ya en el PKGBUILD). Pendiente: publicar el
+  PKGBUILD en AUR (requiere cuenta AUR del usuario) y migrar la integración
+  manual del sistema del usuario, que aún apunta al binario viejo `lazysubs`
+  (`lazysubs-eye install` la detectaría como ajena: hay que quitar la vieja
+  a mano o con el binario antiguo y luego instalar la nueva).
 - **Fase C — producto redondo**: `~/.config/lazysubs-eye/config.toml` (umbrales,
   TTL, providers, iconos), notificaciones 80%/95% vía notify-send con
   anti-spam en la cache, `--check` para scripts.
