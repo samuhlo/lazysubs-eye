@@ -94,6 +94,8 @@ notification_cooldown = 1800 # min seconds between repeat notifications for
                      # the same window (escalations don't wait); 0 = off
 colors = true        # false: no threshold coloring anywhere (the waybar
                      # `error` class stays — it signals breakage, not usage)
+show_account = true  # show the account (email/alias) next to the plan in the
+                     # TUI and the waybar tooltip; false hides it
 
 [providers]          # disable a provider entirely (it isn't even queried)
 claude = true

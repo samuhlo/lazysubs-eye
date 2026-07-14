@@ -29,6 +29,8 @@ pub struct Config {
     /// gauges de la TUI). En false todo va en color neutro; la clase `error`
     /// se mantiene porque señala rotura, no uso.
     pub colors: bool,
+    /// Mostrar la cuenta (email/alias) junto al plan en la TUI y el tooltip.
+    pub show_account: bool,
     pub providers: Providers,
     pub icons: Icons,
     pub minimax: MiniMax,
@@ -134,6 +136,7 @@ impl Default for Config {
             notifications: true,
             notification_cooldown: 30 * 60,
             colors: true,
+            show_account: true,
             providers: Providers::default(),
             icons: Icons::default(),
             minimax: MiniMax::default(),
@@ -288,6 +291,12 @@ fn apply_to_doc(doc: &mut DocumentMut, config: &Config) {
         "colors",
         config.colors != defaults.colors,
         config.colors.into(),
+    );
+    set_if(
+        doc,
+        "show_account",
+        config.show_account != defaults.show_account,
+        config.show_account.into(),
     );
 
     let any_provider_off =

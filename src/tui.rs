@@ -72,6 +72,7 @@ enum Setting {
     Notifications,
     Cooldown,
     Colors,
+    ShowAccount,
     WarningAt,
     CriticalAt,
     Ttl,
@@ -112,6 +113,7 @@ fn settings_items() -> Vec<Setting> {
         Setting::Notifications,
         Setting::Cooldown,
         Setting::Colors,
+        Setting::ShowAccount,
         Setting::WarningAt,
         Setting::CriticalAt,
         Setting::Ttl,
@@ -213,6 +215,7 @@ impl App {
             Setting::Section(_) => return,
             Setting::Notifications => config.notifications = !config.notifications,
             Setting::Colors => config.colors = !config.colors,
+            Setting::ShowAccount => config.show_account = !config.show_account,
             Setting::WarningAt if dir != 0 => {
                 config.warning_at = (config.warning_at + 5.0 * dir as f64).clamp(5.0, 100.0)
             }
@@ -878,6 +881,17 @@ fn fmt_cost(cost: f64) -> String {
     value.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
+/// Recorta cuentas largas (emails) para que quepan en el título del panel.
+fn truncate_account(account: &str) -> String {
+    const MAX: usize = 22;
+    let chars: Vec<char> = account.chars().collect();
+    if chars.len() <= MAX {
+        return account.to_string();
+    }
+    let head: String = chars.into_iter().take(MAX - 1).collect();
+    format!("{head}…")
+}
+
 fn codex_reset_credits_line(p: &ProviderStatus) -> Option<String> {
     (p.id == "codex" && p.error.is_none())
         .then_some(p.reset_credits_available)
@@ -911,6 +925,7 @@ fn setting_row(item: &Setting, config: &crate::config::Config) -> (String, Strin
             format!("◂{:>4}▸", config.notification_cooldown / 60),
         ),
         Setting::Colors => ("colores de umbral".into(), check(config.colors)),
+        Setting::ShowAccount => ("mostrar cuenta".into(), check(config.show_account)),
         Setting::WarningAt => (
             "umbral warning".into(),
             format!("◂{:>3.0}%▸", config.warning_at),
@@ -977,10 +992,16 @@ fn percent_color(pct: f64) -> Color {
 
 fn draw_provider(f: &mut Frame, area: Rect, p: &ProviderStatus) {
     let plan = p.plan.as_deref().unwrap_or("?");
-    let plan_title = match p.stale_since {
-        Some(since) => format!(" {plan} · datos de hace {} ", crate::output::age(since)),
-        None => format!(" {plan} "),
-    };
+    let mut bits = vec![plan.to_string()];
+    if crate::config::get().show_account {
+        if let Some(account) = &p.account {
+            bits.push(truncate_account(account));
+        }
+    }
+    if let Some(since) = p.stale_since {
+        bits.push(format!("datos de hace {}", crate::output::age(since)));
+    }
+    let plan_title = format!(" {} ", bits.join(" · "));
     let block = bordered(format!(" {} {} ", p.icon, p.name))
         .title(Span::styled(plan_title, Style::new().fg(DIM)));
     let inner = block.inner(area);
@@ -1070,6 +1091,7 @@ mod tests {
             name: "Provider".into(),
             icon: "*".into(),
             plan: None,
+            account: None,
             windows: vec![
                 Window {
                     label: "5h".into(),

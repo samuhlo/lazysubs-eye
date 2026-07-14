@@ -70,6 +70,11 @@ fn waybar_with(status: &Status, config: &config::Config) -> String {
 
         let plan = p.plan.as_deref().unwrap_or("?");
         tooltip.push(format!("{} ({plan})", p.name));
+        if config.show_account {
+            if let Some(account) = &p.account {
+                tooltip.push(format!("  {account}"));
+            }
+        }
         if let Some(since) = p.stale_since {
             tooltip.push(format!("  datos de hace {}", age(since)));
         }
@@ -121,6 +126,7 @@ mod tests {
                 name: "Codex".into(),
                 icon: "⬡".into(),
                 plan: Some("pro".into()),
+                account: None,
                 windows: vec![Window {
                     label: "5h".into(),
                     used_percent: 40.0,
@@ -169,6 +175,7 @@ mod tests {
             name: "Claude Code".into(),
             icon: "✳".into(),
             plan: Some("pro".into()),
+            account: None,
             windows: vec![Window {
                 label: "5h".into(),
                 used_percent: 90.0,

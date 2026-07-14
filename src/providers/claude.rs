@@ -18,6 +18,59 @@ pub fn available() -> bool {
 }
 
 #[derive(Deserialize)]
+struct ClaudeJson {
+    #[serde(rename = "oauthAccount")]
+    oauth_account: Option<OauthAccount>,
+}
+
+#[derive(Deserialize)]
+struct OauthAccount {
+    #[serde(rename = "emailAddress")]
+    email_address: Option<String>,
+}
+
+/// Identidad de la cuenta desde `~/.claude.json` (`oauthAccount.emailAddress`).
+/// Solo lee el email; nunca toca los tokens. None si el fichero no existe o no
+/// lo tiene (degrada sin ruido: la cuenta es un extra informativo).
+fn account_identity() -> Option<String> {
+    let home = std::env::var_os("HOME")?;
+    let path = PathBuf::from(home).join(".claude.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    parse_account(&raw)
+}
+
+fn parse_account(raw: &str) -> Option<String> {
+    let parsed: ClaudeJson = serde_json::from_str(raw).ok()?;
+    parsed
+        .oauth_account?
+        .email_address
+        .map(|e| e.trim().to_string())
+        .filter(|e| !e.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_desde_oauth_account_email() {
+        let raw = r#"{"oauthAccount":{"emailAddress":"sam@example.com","displayName":"Sam"}}"#;
+        assert_eq!(parse_account(raw).as_deref(), Some("sam@example.com"));
+    }
+
+    #[test]
+    fn account_ausente_o_vacio_da_none() {
+        assert_eq!(parse_account("{}"), None);
+        assert_eq!(parse_account(r#"{"oauthAccount":{}}"#), None);
+        assert_eq!(
+            parse_account(r#"{"oauthAccount":{"emailAddress":"  "}}"#),
+            None
+        );
+        assert_eq!(parse_account("no es json"), None);
+    }
+}
+
+#[derive(Deserialize)]
 struct CredsFile {
     #[serde(rename = "claudeAiOauth")]
     oauth: Oauth,
@@ -121,6 +174,7 @@ pub fn collect() -> Result<ProviderStatus> {
         name: "Claude Code".into(),
         icon: ICON.into(),
         plan: creds.oauth.subscription_type,
+        account: account_identity(),
         windows,
         reset_credits_available: None,
         stale_since: None,

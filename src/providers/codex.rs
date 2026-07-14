@@ -126,6 +126,7 @@ fn provider_status_from_rate_limits(response: RateLimitsResponse) -> ProviderSta
         name: "Codex".into(),
         icon: ICON.into(),
         plan: rate_limits.plan_type,
+        account: None,
         windows,
         reset_credits_available,
         stale_since: None,

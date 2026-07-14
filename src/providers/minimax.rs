@@ -157,6 +157,7 @@ pub fn collect() -> Result<ProviderStatus> {
         name: "MiniMax".into(),
         icon: ICON.into(),
         plan: Some("token plan".into()),
+        account: None,
         windows,
         reset_credits_available: None,
         stale_since: None,

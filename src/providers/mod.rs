@@ -20,6 +20,10 @@ pub struct ProviderStatus {
     pub name: String,
     pub icon: String,
     pub plan: Option<String>,
+    /// Identidad de la cuenta (email o alias). serde skip si None para
+    /// mantener el contrato JSON estable (como stale_since).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     pub windows: Vec<Window>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_credits_available: Option<u64>,
@@ -37,6 +41,7 @@ impl ProviderStatus {
             name: name.into(),
             icon: icon.into(),
             plan: None,
+            account: None,
             windows: vec![],
             reset_credits_available: None,
             stale_since: None,
@@ -163,6 +168,7 @@ mod tests {
             name: id.into(),
             icon: "x".into(),
             plan: Some("pro".into()),
+            account: None,
             windows: if error.is_some() {
                 vec![]
             } else {
@@ -296,6 +302,7 @@ mod tests {
                 name: "Codex".into(),
                 icon: "⬡".into(),
                 plan: Some("pro".into()),
+                account: None,
                 windows: vec![],
                 reset_credits_available: credits,
                 stale_since: None,
@@ -306,6 +313,10 @@ mod tests {
             assert_eq!(value["plan"], "pro");
             assert_eq!(value["windows"], json!([]));
             assert_eq!(value["reset_credits_available"], json!(credits));
+            assert!(
+                value.get("account").is_none(),
+                "account None no se serializa"
+            );
         }
     }
 }

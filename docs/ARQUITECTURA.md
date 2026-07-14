@@ -125,6 +125,13 @@ Kinds: `session` (ventana 5h), `weekly_all`, `weekly_scoped` (por modelo, con
 Claude Code (caduca cada ~8h). Refrescarlo aquí invalidaría el refresh token
 del CLI. Con token caducado o 401 → error "reauth" y ya.
 
+**Cuenta (E2 paso 1)**: la identidad visible sale de `~/.claude.json`
+(`oauthAccount.emailAddress`), fichero distinto de las credenciales; solo se lee
+el email, nunca los tokens. Va en `ProviderStatus.account` (serde skip si None) y
+se pinta junto al plan en la TUI y el tooltip de waybar si `show_account = true`.
+Codex y MiniMax no autodetectan cuenta (el email de Codex solo vive en el JWT, y
+la API de MiniMax no expone identidad) → usarán el alias de config en multicuenta.
+
 ### Codex (`providers/codex.rs`)
 
 Se lanza `codex app-server` (JSON-RPC 2.0, líneas JSON por stdio) y se envía:

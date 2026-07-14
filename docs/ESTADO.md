@@ -97,6 +97,16 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
   + README. Verificado en vivo contra los datos reales del usuario (backfill de
   ~1 mes en las tres fuentes). Tests puros de la capa SQLite con base en
   memoria. **90 tests** verdes. Pendiente de esta fase: nada (E2/E3 abiertas).
+- **Fase E2 paso 1 — cuenta visible** ✓ (2026-07-14): `ProviderStatus.account:
+  Option<String>` (serde skip si None, contrato JSON estable, test byte-stable
+  ampliado). Claude autodetecta el email desde `~/.claude.json`
+  (`oauthAccount.emailAddress`, solo identidad, nunca tokens; helper puro
+  `parse_account` testado). Codex/MiniMax sin autodetección (JWT no decodificable
+  / API sin identidad) → alias de config en el paso 2. UI: email junto al plan en
+  TUI (truncado) y tooltip de waybar. Config `show_account` (default true) con las
+  tres patas. **94 tests**. Release v0.9.0. **Pendiente E2 paso 2**: multicuenta
+  (`[[accounts.*]]`, collectors parametrizados, ids compuestos, providers
+  dinámicos en el panel `o`).
 - **Post-lanzamiento (2026-07-14, feedback del usuario)** ✓: fix del texto
   truncado "sin uso hoy" en el panel OpenCode (era una celda de tabla con
   columna de 10 chars; ahora es párrafo), degradación con datos previos ante

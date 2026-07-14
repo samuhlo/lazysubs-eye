@@ -186,6 +186,7 @@ mod tests {
                 name: "Claude Code".into(),
                 icon: "✳".into(),
                 plan: None,
+                account: None,
                 windows: vec![Window {
                     label: "5h".into(),
                     used_percent: percent,
