@@ -5,7 +5,7 @@ Traspaso para continuar el desarrollo. Contexto completo del funcionamiento en
 
 ## Resumen
 
-lazysubs es un clon de CodexBar para Omarchy: muestra las cuotas de las
+lazysubs-eye es un clon de CodexBar para Omarchy: muestra las cuotas de las
 suscripciones de IA (Claude Code, Codex) en waybar y en una TUI estilo lazygit,
 más los tokens consumidos hoy por modelo (Claude, Pi, OpenCode). Las fases 1–3
 están completadas, integradas en el sistema del usuario y verificadas en vivo
@@ -56,22 +56,22 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
   módulo waybar para el README (no hay herramienta de captura instalada;
   de momento hay una muestra en texto).
 - **Fase B — instalación en un comando** ✓ (2026-07-14): subcomando
-  `lazysubs install` / `uninstall` (módulo waybar + CSS neutro + windowrule,
-  idempotente, backups `.bak.<epoch>`, marcadores lazysubs-begin/end,
+  `lazysubs-eye install` / `uninstall` (módulo waybar + CSS neutro + windowrule,
+  idempotente, backups `.bak.<epoch>`, marcadores lazysubs-eye-begin/end,
   recarga; ver ARQUITECTURA.md § install), `--signal N` configurable, CI
   (fmt+clippy+test en `.github/workflows/ci.yml`), release con binario
-  estático musl al taggear `v*` (`release.yml`) y PKGBUILD de `lazysubs-bin`
+  estático musl al taggear `v*` (`release.yml`) y PKGBUILD de `lazysubs-eye-bin`
   en `packaging/aur/`. Pendiente de la fase: crear el repo en GitHub
-  (previsto `github.com/samuhlo/lazysubs`, referenciado en el PKGBUILD),
+  (previsto `github.com/samuhlo/lazysubs-eye`, referenciado en el PKGBUILD),
   validar el primer build musl en CI, rellenar el sha256 del PKGBUILD con la
   primera release y publicarlo en AUR. El `install` no se ha ejecutado
   contra el sistema del usuario (su integración manual sigue intacta; el
   ciclo completo está validado en sandbox y con tests de round-trip).
-- **Fase C — producto redondo**: `~/.config/lazysubs/config.toml` (umbrales,
+- **Fase C — producto redondo**: `~/.config/lazysubs-eye/config.toml` (umbrales,
   TTL, providers, iconos), notificaciones 80%/95% vía notify-send con
   anti-spam en la cache, `--check` para scripts.
 - **Fase D — v1.x**: providers de cuotas para Gemini CLI y OpenCode,
-  historial + sparklines (`~/.local/state/lazysubs/`), coste estimado y
+  historial + sparklines (`~/.local/state/lazysubs-eye/`), coste estimado y
   desglose por proyecto.
 - **Decisión abierta**: idioma de la propia UI (hoy en español; el README ya
   está en inglés). Decidir antes del anuncio público.

@@ -8,7 +8,7 @@ fn cache_dir() -> PathBuf {
         .unwrap_or_else(|_| {
             PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cache")
         });
-    base.join("lazysubs")
+    base.join("lazysubs-eye")
 }
 
 fn cache_file() -> PathBuf {
@@ -80,14 +80,13 @@ mod tests {
 
     #[test]
     fn opencode_daily_index_has_an_independent_v1_name() {
-        assert!(
-            opencode_daily_index_file().ends_with("lazysubs/opencode-daily-token-index-v1.json")
-        );
+        assert!(opencode_daily_index_file()
+            .ends_with("lazysubs-eye/opencode-daily-token-index-v1.json"));
     }
 
     #[test]
     fn atomic_save_replaces_a_complete_index() {
-        let path = std::env::temp_dir().join(format!("lazysubs-cache-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("lazysubs-eye-cache-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         let index = path.join("index.json");
         atomic_save(&index, br#"{"version":1}"#).unwrap();
@@ -98,7 +97,7 @@ mod tests {
 
     #[test]
     fn failed_final_rename_keeps_the_previous_complete_index_readable() {
-        let path = std::env::temp_dir().join(format!("lazysubs-rename-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("lazysubs-eye-rename-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         let index = path.join("index.json");
         let previous = br#"{"version":1}"#;

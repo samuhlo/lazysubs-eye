@@ -236,7 +236,7 @@ impl App {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
-                    " lazysubs ",
+                    " lazysubs-eye ",
                     Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("· cuotas de IA", Style::new().fg(DIM)),

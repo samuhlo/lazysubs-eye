@@ -170,7 +170,7 @@ pub fn collect() -> Result<ProviderStatus> {
 
     for msg in [
         json!({"jsonrpc":"2.0","id":1,"method":"initialize",
-               "params":{"clientInfo":{"name":"lazysubs","title":"lazysubs","version":env!("CARGO_PKG_VERSION")}}}),
+               "params":{"clientInfo":{"name":"lazysubs-eye","title":"lazysubs-eye","version":env!("CARGO_PKG_VERSION")}}}),
         json!({"jsonrpc":"2.0","method":"initialized"}),
         json!({"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read","params":{}}),
     ] {

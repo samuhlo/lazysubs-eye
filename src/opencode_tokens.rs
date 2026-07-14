@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const INDEX_FORMAT: &str = "lazysubs-opencode-daily";
+const INDEX_FORMAT: &str = "lazysubs-eye-opencode-daily";
 const INDEX_VERSION: u8 = 1;
 const RECONCILE_INTERVAL_MS: i64 = 24 * 60 * 60 * 1_000;
 
@@ -791,7 +791,7 @@ mod tests {
     fn fixture_db() -> FixtureDb {
         let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
-            "lazysubs-opencode-fixture-{}-{sequence}",
+            "lazysubs-eye-opencode-fixture-{}-{sequence}",
             std::process::id()
         ));
         std::fs::create_dir_all(&root).unwrap();
@@ -1127,7 +1127,8 @@ mod tests {
 
     #[test]
     fn collector_reads_only_assistant_step_finishes_and_uses_the_cache_incrementally() {
-        let root = std::env::temp_dir().join(format!("lazysubs-opencode-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("lazysubs-eye-opencode-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let db = root.join("fixture.db");

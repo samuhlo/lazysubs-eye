@@ -595,7 +595,7 @@ mod tests {
     }
 
     fn test_dir(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!("lazysubs-{name}-{}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("lazysubs-eye-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
         path
@@ -694,7 +694,8 @@ mod tests {
 
     #[test]
     fn empty_or_unavailable_root_returns_an_empty_snapshot() {
-        let root = std::env::temp_dir().join(format!("lazysubs-missing-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("lazysubs-eye-missing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         assert!(update_pi_index(&root, &root.join("index.json"), DayKey::now()).is_empty());
     }

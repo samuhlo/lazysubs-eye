@@ -2,7 +2,7 @@
 //!
 //! Edita los configs del usuario por texto (no se reserializa el JSONC, así
 //! se conservan sus comentarios y formato). Todo lo insertado va delimitado
-//! por marcadores `lazysubs-begin` / `lazysubs-end` (o `// lazysubs` en
+//! por marcadores `lazysubs-eye-begin` / `lazysubs-eye-end` (o `// lazysubs-eye` en
 //! líneas sueltas) para que `uninstall` pueda revertirlo con seguridad.
 //! Antes de tocar un fichero se guarda un backup `<fichero>.bak.<epoch>`.
 
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const MODULE_KEY: &str = "custom/ai-usage";
-const WINDOWRULE: &str = "windowrule = tag +floating-window, match:class org.omarchy.lazysubs";
+const WINDOWRULE: &str = "windowrule = tag +floating-window, match:class org.omarchy.lazysubs-eye";
 
 struct ConfigPaths {
     waybar_config: PathBuf,
@@ -48,19 +48,19 @@ fn exec_path() -> String {
             }
         }
         (Some(exe), None) => exe.to_string_lossy().into_owned(),
-        (None, _) => "lazysubs".to_string(),
+        (None, _) => "lazysubs-eye".to_string(),
     }
 }
 
 fn module_definition(exec: &str, signal: u8) -> String {
     format!(
-        r#"  // lazysubs-begin
+        r#"  // lazysubs-eye-begin
   "{MODULE_KEY}": {{
     "exec": "{exec} --waybar",
     "return-type": "json",
     "interval": 60,
     "signal": {signal},
-    "on-click": "omarchy-launch-or-focus-tui lazysubs",
+    "on-click": "omarchy-launch-or-focus-tui lazysubs-eye",
     "on-click-right": "{exec} --no-cache --waybar >/dev/null && pkill -RTMIN+{signal} waybar"
   }}"#
     )
@@ -70,12 +70,12 @@ fn style_block() -> String {
     // Colores neutros: heredan del tema activo de Omarchy vía @foreground
     // (definido por el @import del tema en style.css). warning/critical llevan
     // hex propios porque los temas solo exponen foreground/background.
-    "\n/* lazysubs-begin */\n\
+    "\n/* lazysubs-eye-begin */\n\
      #custom-ai-usage {\n  margin: 0 8px;\n}\n\n\
      #custom-ai-usage.warning {\n  color: #e5c07b;\n}\n\n\
      #custom-ai-usage.critical {\n  color: #e06c75;\n}\n\n\
      #custom-ai-usage.error {\n  color: alpha(@foreground, 0.6);\n}\n\
-     /* lazysubs-end */\n"
+     /* lazysubs-eye-end */\n"
         .to_string()
 }
 
@@ -95,10 +95,10 @@ fn waybar_config_with_module(config: &str, module_def: &str) -> Option<String> {
         // "modules-right": [...] , → la definición va tras la coma, con coma final
         ',' => (
             close + 1 + after_close.0 + 1,
-            format!("\n{module_def},\n  // lazysubs-end"),
+            format!("\n{module_def},\n  // lazysubs-eye-end"),
         ),
         // "modules-right": [...] } → era el último miembro: coma antes, sin coma final
-        '}' => (close + 1, format!(",\n{module_def}\n  // lazysubs-end")),
+        '}' => (close + 1, format!(",\n{module_def}\n  // lazysubs-eye-end")),
         _ => return None,
     };
     let mut out = String::with_capacity(config.len() + def_text.len() + 64);
@@ -109,9 +109,9 @@ fn waybar_config_with_module(config: &str, module_def: &str) -> Option<String> {
     // Entrada al principio de modules-right (con coma solo si el array no está vacío).
     let array_empty = config[open + 1..close].trim().is_empty();
     let entry = if array_empty {
-        format!("\n    \"{MODULE_KEY}\" // lazysubs\n  ")
+        format!("\n    \"{MODULE_KEY}\" // lazysubs-eye\n  ")
     } else {
-        format!("\n    \"{MODULE_KEY}\", // lazysubs")
+        format!("\n    \"{MODULE_KEY}\", // lazysubs-eye")
     };
     out.insert_str(open + 1, &entry);
     Some(out)
@@ -147,8 +147,8 @@ fn find_matching_bracket(s: &str) -> Option<usize> {
     None
 }
 
-/// Elimina las líneas marcadas con `lazysubs` y los bloques
-/// `lazysubs-begin`…`lazysubs-end` (inclusive). Devuelve el texto limpio y si
+/// Elimina las líneas marcadas con `lazysubs-eye` y los bloques
+/// `lazysubs-eye-begin`…`lazysubs-eye-end` (inclusive). Devuelve el texto limpio y si
 /// hubo cambios.
 fn strip_marked(text: &str) -> (String, bool) {
     let mut out = String::with_capacity(text.len());
@@ -157,17 +157,17 @@ fn strip_marked(text: &str) -> (String, bool) {
     for line in text.split_inclusive('\n') {
         if in_block {
             changed = true;
-            if line.contains("lazysubs-end") {
+            if line.contains("lazysubs-eye-end") {
                 in_block = false;
             }
             continue;
         }
-        if line.contains("lazysubs-begin") {
+        if line.contains("lazysubs-eye-begin") {
             in_block = true;
             changed = true;
             continue;
         }
-        if line.contains("// lazysubs") || line.contains("# lazysubs") {
+        if line.contains("// lazysubs-eye") || line.contains("# lazysubs-eye") {
             changed = true;
             continue;
         }
@@ -267,7 +267,7 @@ pub fn install(signal: u8) -> Result<()> {
     // hyprland.conf (ventana flotante para la TUI)
     let hypr = std::fs::read_to_string(&paths.hyprland_conf)
         .with_context(|| format!("no pude leer {:?}", paths.hyprland_conf))?;
-    if hypr.contains("org.omarchy.lazysubs") {
+    if hypr.contains("org.omarchy.lazysubs-eye") {
         println!(
             "  · windowrule ya presente, no toco {}",
             paths.hyprland_conf.display()
@@ -276,7 +276,7 @@ pub fn install(signal: u8) -> Result<()> {
         let sep = if hypr.ends_with('\n') { "" } else { "\n" };
         write_with_backup(
             &paths.hyprland_conf,
-            &format!("{hypr}{sep}\n{WINDOWRULE} # lazysubs\n"),
+            &format!("{hypr}{sep}\n{WINDOWRULE} # lazysubs-eye\n"),
         )?;
         changed = true;
     }
@@ -320,7 +320,7 @@ pub fn uninstall() -> Result<()> {
     if let Ok(text) = std::fs::read_to_string(&paths.hyprland_conf) {
         let kept: String = text
             .split_inclusive('\n')
-            .filter(|l| !l.contains("org.omarchy.lazysubs"))
+            .filter(|l| !l.contains("org.omarchy.lazysubs-eye"))
             .collect();
         if kept.len() != text.len() {
             write_with_backup(&paths.hyprland_conf, &kept)?;
@@ -356,10 +356,10 @@ mod tests {
 
     #[test]
     fn inserta_en_config_stock() {
-        let def = module_definition("$HOME/.local/bin/lazysubs", 11);
+        let def = module_definition("$HOME/.local/bin/lazysubs-eye", 11);
         let out = waybar_config_with_module(STOCK, &def).unwrap();
-        assert!(out.contains("\"custom/ai-usage\", // lazysubs"));
-        assert!(out.contains("// lazysubs-begin"));
+        assert!(out.contains("\"custom/ai-usage\", // lazysubs-eye"));
+        assert!(out.contains("// lazysubs-eye-begin"));
         assert!(out.contains("\"signal\": 11,"));
         // la entrada queda la primera del array
         let entry = out.find("\"custom/ai-usage\",").unwrap();
@@ -380,7 +380,7 @@ mod tests {
     #[test]
     fn inserta_cuando_modules_right_es_el_ultimo_miembro() {
         let config = "{\n  \"modules-right\": [\n    \"battery\"\n  ]\n}";
-        let def = module_definition("lazysubs", 11);
+        let def = module_definition("lazysubs-eye", 11);
         let out = waybar_config_with_module(config, &def).unwrap();
         let json: String = out
             .lines()
@@ -396,8 +396,9 @@ mod tests {
     #[test]
     fn inserta_en_array_vacio_sin_coma_colgante() {
         let config = "{\n  \"modules-right\": [],\n  \"clock\": {}\n}";
-        let out = waybar_config_with_module(config, &module_definition("lazysubs", 11)).unwrap();
-        assert!(out.contains("\"custom/ai-usage\" // lazysubs"));
+        let out =
+            waybar_config_with_module(config, &module_definition("lazysubs-eye", 11)).unwrap();
+        assert!(out.contains("\"custom/ai-usage\" // lazysubs-eye"));
     }
 
     #[test]
@@ -407,7 +408,7 @@ mod tests {
 
     #[test]
     fn strip_revierte_la_insercion() {
-        let def = module_definition("lazysubs", 11);
+        let def = module_definition("lazysubs-eye", 11);
         let out = waybar_config_with_module(STOCK, &def).unwrap();
         let (clean, changed) = strip_marked(&out);
         assert!(changed);

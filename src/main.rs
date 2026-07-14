@@ -14,12 +14,12 @@ const DEFAULT_TTL_SECS: i64 = 60;
 const DEFAULT_SIGNAL: u8 = 11;
 
 const HELP: &str = "\
-lazysubs — monitor de cuotas de suscripciones de IA (Claude Code, Codex)
+lazysubs-eye — monitor de cuotas de suscripciones de IA (Claude Code, Codex)
 
-Uso: lazysubs [tui|install|uninstall|--json|--waybar] [opciones]
+Uso: lazysubs-eye [tui|install|uninstall|--json|--waybar] [opciones]
 
   tui         interfaz de terminal (por defecto si stdout es una tty)
-  install     integra lazysubs en waybar y Hyprland (idempotente, con backups)
+  install     integra lazysubs-eye en waybar y Hyprland (idempotente, con backups)
   uninstall   revierte la integración
   --json      volcado completo del estado (por defecto sin tty)
   --waybar    JSON de una línea para un módulo custom de waybar
@@ -65,7 +65,7 @@ fn main() {
                 return;
             }
             "-V" | "--version" => {
-                println!("lazysubs {}", env!("CARGO_PKG_VERSION"));
+                println!("lazysubs-eye {}", env!("CARGO_PKG_VERSION"));
                 return;
             }
             other => {

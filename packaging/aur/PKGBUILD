@@ -1,23 +1,23 @@
 # Maintainer: Samuel López (samuhlo) <samuhlodev@gmail.com>
-pkgname=lazysubs-bin
-pkgver=0.1.0
+pkgname=lazysubs-eye-bin
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="AI subscription quota monitor for Omarchy (waybar + TUI)"
 arch=('x86_64')
-url="https://github.com/samuhlo/lazysubs"
+url="https://github.com/samuhlo/lazysubs-eye"
 license=('MIT')
-provides=('lazysubs')
-conflicts=('lazysubs')
+provides=('lazysubs-eye')
+conflicts=('lazysubs-eye')
 optdepends=(
   'waybar: status bar module'
   'hyprland: floating TUI window rule'
 )
-source=("$url/releases/download/v$pkgver/lazysubs-$pkgver-x86_64-linux-musl.tar.gz")
+source=("$url/releases/download/v$pkgver/lazysubs-eye-$pkgver-x86_64-linux-musl.tar.gz")
 sha256sums=('SKIP') # rellenar con el .sha256 de la release al publicar
 
 package() {
-  cd "lazysubs-$pkgver-x86_64-linux-musl"
-  install -Dm755 lazysubs "$pkgdir/usr/bin/lazysubs"
+  cd "lazysubs-eye-$pkgver-x86_64-linux-musl"
+  install -Dm755 lazysubs-eye "$pkgdir/usr/bin/lazysubs-eye"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
 }

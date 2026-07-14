@@ -1,11 +1,11 @@
-# lazysubs
+# lazysubs-eye
 
 AI subscription quota monitor for [Omarchy](https://omarchy.org), lazygit-style.
 Shows the rate-limit windows (5h session, weekly…) of your AI CLIs in waybar
 and in a TUI, plus a per-model breakdown of the tokens you've burned today.
 
 ```
- lazysubs · cuotas de IA
+ lazysubs-eye · cuotas de IA
 ╭ ✳ Claude Code ─ pro ──────────────────────────────────────────────────────────╮
 │ 5h                73% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   → 3h06m │
 │ semana            36% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   → 5d21h │
@@ -41,61 +41,61 @@ Daily token usage panels are also built from local data:
 | OpenCode tokens today | OpenCode SQLite database in `~/.local/state/opencode` |
 
 Everything runs locally: nothing is sent to third parties — only the official
-API of each provider is queried with your own credentials. lazysubs **never
+API of each provider is queried with your own credentials. lazysubs-eye **never
 refreshes OAuth tokens** (each CLI does that itself); if a token expires it
 shows a reauth notice.
 
 ## Usage
 
 ```
-lazysubs            # TUI if stdout is a tty; JSON otherwise
-lazysubs tui        # explicit TUI (q quit · r refresh; auto-refresh 60s)
-lazysubs install    # wire up waybar + Hyprland (idempotent, with backups)
-lazysubs uninstall  # revert the integration
-lazysubs --json     # full JSON dump of the state
-lazysubs --waybar   # single-line JSON for a custom waybar module
-lazysubs --no-cache # force a fresh query
-lazysubs --ttl 120  # cache validity (seconds, default 60)
-lazysubs --signal 8 # RTMIN+N signal for the waybar module (install, default 11)
-lazysubs --version  # print version
+lazysubs-eye            # TUI if stdout is a tty; JSON otherwise
+lazysubs-eye tui        # explicit TUI (q quit · r refresh; auto-refresh 60s)
+lazysubs-eye install    # wire up waybar + Hyprland (idempotent, with backups)
+lazysubs-eye uninstall  # revert the integration
+lazysubs-eye --json     # full JSON dump of the state
+lazysubs-eye --waybar   # single-line JSON for a custom waybar module
+lazysubs-eye --no-cache # force a fresh query
+lazysubs-eye --ttl 120  # cache validity (seconds, default 60)
+lazysubs-eye --signal 8 # RTMIN+N signal for the waybar module (install, default 11)
+lazysubs-eye --version  # print version
 ```
 
-The cache lives in `~/.cache/lazysubs/status.json` (cached runs take ~5 ms,
+The cache lives in `~/.cache/lazysubs-eye/status.json` (cached runs take ~5 ms,
 so waybar can poll every 60 s for free).
 
 ## Installation
 
-From source (requires Rust; an AUR package — `lazysubs-bin` — is planned,
+From source (requires Rust; an AUR package — `lazysubs-eye-bin` — is planned,
 see `packaging/aur/PKGBUILD`):
 
 ```
 cargo install --path .
 ```
 
-Then let lazysubs wire itself into your Omarchy setup:
+Then let lazysubs-eye wire itself into your Omarchy setup:
 
 ```
-lazysubs install
+lazysubs-eye install
 ```
 
 This inserts the waybar module (first in `modules-right`), theme-neutral CSS
 and the Hyprland windowrule for the floating TUI, then reloads both. Every
 touched file gets a `.bak.<epoch>` backup, everything inserted is fenced with
-`lazysubs-begin`/`lazysubs-end` markers, and `lazysubs uninstall` reverts it
+`lazysubs-eye-begin`/`lazysubs-eye-end` markers, and `lazysubs-eye uninstall` reverts it
 byte for byte. Use `--signal N` if RTMIN+11 collides with another module.
 
 ## Waybar integration (manual)
 
-What `lazysubs install` sets up, if you prefer to do it by hand:
+What `lazysubs-eye install` sets up, if you prefer to do it by hand:
 
 ```jsonc
 "custom/ai-usage": {
-  "exec": "$HOME/.local/bin/lazysubs --waybar",
+  "exec": "$HOME/.local/bin/lazysubs-eye --waybar",
   "return-type": "json",
   "interval": 60,
   "signal": 11,
-  "on-click": "omarchy-launch-or-focus-tui lazysubs",
-  "on-click-right": "$HOME/.local/bin/lazysubs --no-cache --waybar >/dev/null && pkill -RTMIN+11 waybar"
+  "on-click": "omarchy-launch-or-focus-tui lazysubs-eye",
+  "on-click-right": "$HOME/.local/bin/lazysubs-eye --no-cache --waybar >/dev/null && pkill -RTMIN+11 waybar"
 }
 ```
 
@@ -105,7 +105,7 @@ Left click opens (or focuses) the TUI in a floating terminal. That needs this
 rule in `~/.config/hypr/hyprland.conf` so the window floats centered:
 
 ```
-windowrule = tag +floating-window, match:class org.omarchy.lazysubs
+windowrule = tag +floating-window, match:class org.omarchy.lazysubs-eye
 ```
 
 ## Documentation
@@ -121,7 +121,7 @@ Internal docs are in Spanish:
 - [x] Phase 2 — waybar integration + floating window on Hyprland
 - [x] Phase 3 — TUI (ratatui) with terminal theming + today's tokens per model
 - [x] Codex reset credits · daily tokens for Pi and OpenCode
-- [x] `lazysubs install` / `uninstall` (one-command waybar + Hyprland setup)
+- [x] `lazysubs-eye install` / `uninstall` (one-command waybar + Hyprland setup)
 - [x] CI + release binaries (static musl) + AUR PKGBUILD
 - [ ] Config file, threshold notifications (mako), `--check` for scripts
 - [ ] Quota providers for Gemini CLI and OpenCode, history + sparklines

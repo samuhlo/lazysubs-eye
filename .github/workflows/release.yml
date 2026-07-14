@@ -23,15 +23,15 @@ jobs:
       - name: Empaqueta
         run: |
           version="${GITHUB_REF_NAME#v}"
-          dir="lazysubs-${version}-x86_64-linux-musl"
+          dir="lazysubs-eye-${version}-x86_64-linux-musl"
           mkdir "$dir"
-          cp target/x86_64-unknown-linux-musl/release/lazysubs LICENSE README.md "$dir/"
+          cp target/x86_64-unknown-linux-musl/release/lazysubs-eye LICENSE README.md "$dir/"
           tar czf "$dir.tar.gz" "$dir"
           sha256sum "$dir.tar.gz" > "$dir.tar.gz.sha256"
       - name: Publica release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            lazysubs-*-x86_64-linux-musl.tar.gz
-            lazysubs-*-x86_64-linux-musl.tar.gz.sha256
+            lazysubs-eye-*-x86_64-linux-musl.tar.gz
+            lazysubs-eye-*-x86_64-linux-musl.tar.gz.sha256
           generate_release_notes: true

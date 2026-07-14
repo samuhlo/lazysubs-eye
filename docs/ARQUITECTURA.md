@@ -1,4 +1,4 @@
-# Arquitectura de lazysubs
+# Arquitectura de lazysubs-eye
 
 Monitor de cuotas de suscripciones de IA para Omarchy (Arch + Hyprland + waybar),
 inspirado en [CodexBar](https://github.com/steipete/CodexBar) (macOS). Un único
@@ -14,7 +14,7 @@ src/
 │   ├── claude.rs      # collector de Claude Code (HTTP al endpoint OAuth)
 │   └── codex.rs       # collector de Codex (JSON-RPC a `codex app-server`)
 ├── tokens.rs          # tokens de hoy por modelo (parseo de JSONL locales de Claude)
-├── cache.rs           # cache JSON con TTL en ~/.cache/lazysubs/status.json
+├── cache.rs           # cache JSON con TTL en ~/.cache/lazysubs-eye/status.json
 ├── output.rs          # render --waybar y --json + countdown() + umbrales de color
 ├── install.rs         # subcomandos install/uninstall (waybar + hyprland)
 └── tui.rs             # TUI ratatui (gauges, countdowns, tabla de tokens)
@@ -22,7 +22,7 @@ src/
 
 ### install / uninstall (install.rs)
 
-`lazysubs install [--signal N]` integra el módulo en el sistema editando los
+`lazysubs-eye install [--signal N]` integra el módulo en el sistema editando los
 configs **por texto** (nunca se reserializa el JSONC: se conservan comentarios
 y formato del usuario):
 
@@ -33,8 +33,8 @@ y formato del usuario):
   porque los temas de Omarchy solo exponen foreground/background).
 - `~/.config/hypr/hyprland.conf`: windowrule de la ventana flotante.
 
-Todo lo insertado va delimitado con marcadores `lazysubs-begin`/`lazysubs-end`
-(o `// lazysubs` en líneas sueltas); `uninstall` elimina exactamente eso y
+Todo lo insertado va delimitado con marcadores `lazysubs-eye-begin`/`lazysubs-eye-end`
+(o `// lazysubs-eye` en líneas sueltas); `uninstall` elimina exactamente eso y
 restaura el fichero byte a byte (hay test de round-trip). Ambos comandos son
 idempotentes, hacen backup `.bak.<epoch>` antes de escribir y recargan con
 `omarchy restart waybar` + `hyprctl reload` (+ `configerrors`). Si el config
@@ -71,7 +71,7 @@ La respuesta trae un array `limits` con `{kind, percent, resets_at (RFC3339), is
 Kinds: `session` (ventana 5h), `weekly_all`, `weekly_scoped` (por modelo, con
 `scope.model.display_name`). También trae `extra_usage` y `spend` (sin usar aún).
 
-**Regla crítica**: lazysubs NUNCA refresca el token OAuth — lo hace el propio
+**Regla crítica**: lazysubs-eye NUNCA refresca el token OAuth — lo hace el propio
 Claude Code (caduca cada ~8h). Refrescarlo aquí invalidaría el refresh token
 del CLI. Con token caducado o 401 → error "reauth" y ya.
 
@@ -98,7 +98,7 @@ cache_creation) por `message.model`. Descarta modelos sintéticos (`<...>`).
 
 ## Cache (`cache.rs`)
 
-`~/.cache/lazysubs/status.json` con `fetched_at`; TTL por defecto 60s. La
+`~/.cache/lazysubs-eye/status.json` con `fetched_at`; TTL por defecto 60s. La
 ejecución cacheada tarda ~5ms, por eso waybar puede ejecutar el binario cada
 60s sin coste. Los countdowns se calculan al renderizar (desde `resets_at`),
 nunca se cachean, así que no salen rancios.
@@ -126,16 +126,16 @@ countdown a la derecha, tabla de tokens de hoy, y pie con atajos.
 
 | Qué | Dónde |
 |---|---|
-| Binario instalado | `cargo install --path .` → `~/.cargo/bin/lazysubs` |
-| Symlink en PATH | `~/.local/bin/lazysubs` → `~/.cargo/bin/lazysubs` (⚠ `~/.cargo/bin` NO está en el PATH del usuario) |
+| Binario instalado | `cargo install --path .` → `~/.cargo/bin/lazysubs-eye` |
+| Symlink en PATH | `~/.local/bin/lazysubs-eye` → `~/.cargo/bin/lazysubs-eye` (⚠ `~/.cargo/bin` NO está en el PATH del usuario) |
 | Módulo waybar | `~/.config/waybar/config.jsonc` → `custom/ai-usage` (primero en `modules-right`) |
 | Estilos waybar | `~/.config/waybar/style.css` → `#custom-ai-usage` (10px; colores de la paleta Carbon Vándalo: warning `#FFCA40`, critical `#E04C4C`, error `#D99A6C`) |
-| Windowrule | Última línea de `~/.config/hypr/hyprland.conf`: `windowrule = tag +floating-window, match:class org.omarchy.lazysubs` |
+| Windowrule | Última línea de `~/.config/hypr/hyprland.conf`: `windowrule = tag +floating-window, match:class org.omarchy.lazysubs-eye` |
 
 El módulo waybar usa `signal: 11` → cualquier script puede forzar el repintado
 con `pkill -RTMIN+11 waybar`. El click derecho hace exactamente eso tras un
-`--no-cache`. El click izquierdo lanza `omarchy-launch-or-focus-tui lazysubs`,
-que abre la TUI en terminal flotante con clase `org.omarchy.lazysubs` (el tag
+`--no-cache`. El click izquierdo lanza `omarchy-launch-or-focus-tui lazysubs-eye`,
+que abre la TUI en terminal flotante con clase `org.omarchy.lazysubs-eye` (el tag
 `floating-window` de Omarchy le da float + centrado + 875x600 de serie) o
 enfoca la ventana si ya existe.
 
@@ -147,10 +147,10 @@ CSS sí, por `reload_style_on_change`). Tras editar Hyprland: `hyprctl reload`
 
 ```bash
 cargo build                              # compila sin warnings
-./target/debug/lazysubs --no-cache --json  # collectors en vivo
-./target/debug/lazysubs --waybar           # línea para waybar
+./target/debug/lazysubs-eye --no-cache --json  # collectors en vivo
+./target/debug/lazysubs-eye --waybar           # línea para waybar
 
 # TUI headless: captura de pantalla textual con tmux
-tmux new-session -d -s t -x 100 -y 30 './target/debug/lazysubs tui' \
+tmux new-session -d -s t -x 100 -y 30 './target/debug/lazysubs-eye tui' \
   && sleep 6 && tmux capture-pane -t t -p; tmux kill-session -t t
 ```
