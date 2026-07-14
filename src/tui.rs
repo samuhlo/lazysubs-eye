@@ -1,3 +1,6 @@
+use crate::opencode_tokens::{
+    self, OpenCodePanelState, OpenCodeUnavailableReason, OpenCodeUsageRow,
+};
 use crate::output::countdown;
 use crate::pi_tokens::{self, PiUsageRow};
 use crate::providers::{ProviderStatus, Status};
@@ -31,17 +34,20 @@ enum Update {
     Status(Status),
     Tokens(Vec<ModelTokens>),
     PiTokens(Vec<PiUsageRow>),
+    OpenCodeTokens(OpenCodePanelState),
 }
 
 struct App {
     status: Option<Status>,
     tokens: Vec<ModelTokens>,
     pi_tokens: Vec<PiUsageRow>,
+    opencode_tokens: OpenCodePanelState,
     refreshing: bool,
     tx: mpsc::Sender<Update>,
     rx: mpsc::Receiver<Update>,
     tokens_scanning: bool,
     pi_tokens_scanning: bool,
+    opencode_scanning: bool,
     last_refresh: Instant,
 }
 
@@ -52,11 +58,13 @@ impl App {
             status: None,
             tokens: vec![],
             pi_tokens: vec![],
+            opencode_tokens: OpenCodePanelState::Loading,
             refreshing: false,
             tx,
             rx,
             tokens_scanning: false,
             pi_tokens_scanning: false,
+            opencode_scanning: false,
             last_refresh: Instant::now(),
         }
     }
@@ -93,6 +101,14 @@ impl App {
                 let _ = tx.send(Update::PiTokens(pi_tokens::scan_pi_today()));
             });
         }
+        if self.begin_opencode_token_scan() {
+            let tx = self.tx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(Update::OpenCodeTokens(
+                    opencode_tokens::scan_opencode_today(),
+                ));
+            });
+        }
     }
 
     fn begin_token_scan(&mut self) -> bool {
@@ -111,6 +127,14 @@ impl App {
         true
     }
 
+    fn begin_opencode_token_scan(&mut self) -> bool {
+        if self.opencode_scanning {
+            return false;
+        }
+        self.opencode_scanning = true;
+        true
+    }
+
     fn apply_update(&mut self, update: Update) {
         match update {
             Update::Status(status) => {
@@ -124,6 +148,17 @@ impl App {
             Update::PiTokens(tokens) => {
                 self.pi_tokens = tokens;
                 self.pi_tokens_scanning = false;
+            }
+            Update::OpenCodeTokens(tokens) => {
+                self.opencode_tokens = match (self.opencode_tokens.clone(), tokens) {
+                    (OpenCodePanelState::Ready(rows), OpenCodePanelState::Unavailable(reason))
+                    | (
+                        OpenCodePanelState::Stale { rows, .. },
+                        OpenCodePanelState::Unavailable(reason),
+                    ) => OpenCodePanelState::Stale { rows, reason },
+                    (_, state) => state,
+                };
+                self.opencode_scanning = false;
             }
         }
     }
@@ -173,6 +208,9 @@ impl App {
         if !self.pi_tokens.is_empty() {
             constraints.push(Constraint::Length(pi_section_height(self.pi_tokens.len())));
         }
+        constraints.push(Constraint::Length(opencode_section_height(
+            &self.opencode_tokens,
+        )));
         constraints.push(Constraint::Min(0)); // relleno
         constraints.push(Constraint::Length(1)); // pie
         let areas = Layout::vertical(constraints).split(f.area());
@@ -188,7 +226,9 @@ impl App {
         }
         if !self.pi_tokens.is_empty() {
             self.draw_pi_tokens(f, areas[section]);
+            section += 1;
         }
+        self.draw_opencode_tokens(f, areas[section]);
         self.draw_footer(f, areas[areas.len() - 1], status);
     }
 
@@ -277,6 +317,46 @@ impl App {
         );
     }
 
+    fn draw_opencode_tokens(&self, f: &mut Frame, area: Rect) {
+        let header = Row::new(vec![
+            "provider", "modelo", "in", "out", "raz", "cache→", "cache+", "total", "coste",
+        ])
+        .style(Style::new().fg(DIM).add_modifier(Modifier::BOLD));
+        let rows = match &self.opencode_tokens {
+            OpenCodePanelState::Ready(rows) | OpenCodePanelState::Stale { rows, .. } => {
+                rows.iter().map(opencode_table_row).collect()
+            }
+            OpenCodePanelState::Loading => vec![Row::new(vec!["leyendo OpenCode…"])],
+            OpenCodePanelState::Empty => vec![Row::new(vec!["sin uso hoy"])],
+            OpenCodePanelState::Unavailable(reason) => {
+                vec![Row::new(vec![unavailable_text(*reason)])]
+            }
+        };
+        let widths = [
+            Constraint::Length(10),
+            Constraint::Fill(1),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(7),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(8),
+            Constraint::Length(9),
+        ];
+        let title = match &self.opencode_tokens {
+            OpenCodePanelState::Stale { reason, .. } => {
+                format!(" OpenCode hoy · {} ", unavailable_text(*reason))
+            }
+            _ => " OpenCode hoy ".into(),
+        };
+        f.render_widget(
+            Table::new(rows, widths)
+                .header(header)
+                .block(bordered(title).padding(Padding::horizontal(1))),
+            area,
+        );
+    }
+
     fn draw_footer(&self, f: &mut Frame, area: Rect, status: &Status) {
         let [left, right] =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(24)]).areas(area);
@@ -306,6 +386,46 @@ impl App {
 
 fn pi_section_height(rows: usize) -> u16 {
     rows.saturating_add(3).min(u16::MAX as usize) as u16
+}
+
+fn opencode_section_height(state: &OpenCodePanelState) -> u16 {
+    match state {
+        OpenCodePanelState::Ready(rows) | OpenCodePanelState::Stale { rows, .. } => {
+            pi_section_height(rows.len())
+        }
+        _ => 4,
+    }
+}
+
+fn opencode_table_row(row: &OpenCodeUsageRow) -> Row<'static> {
+    Row::new(vec![
+        row.provider.clone(),
+        row.model.clone(),
+        fmt_optional_count(row.input),
+        fmt_optional_count(row.output),
+        fmt_optional_count(row.reasoning),
+        fmt_optional_count(row.cache_read),
+        fmt_optional_count(row.cache_write),
+        fmt_optional_count(row.total),
+        row.cost.map(fmt_cost).unwrap_or_else(|| "—".into()),
+    ])
+}
+
+fn fmt_optional_count(value: Option<u64>) -> String {
+    value.map(fmt_count).unwrap_or_else(|| "—".into())
+}
+
+fn unavailable_text(reason: OpenCodeUnavailableReason) -> &'static str {
+    match reason {
+        OpenCodeUnavailableReason::Missing => "OpenCode no disponible",
+        OpenCodeUnavailableReason::PermissionDenied => "sin permisos para OpenCode",
+        OpenCodeUnavailableReason::Busy => "OpenCode ocupado temporalmente",
+        OpenCodeUnavailableReason::EphemeralDatabase => "base efímera no disponible",
+        OpenCodeUnavailableReason::SchemaIncompatible => "esquema OpenCode incompatible",
+        OpenCodeUnavailableReason::InvalidUsage => "uso OpenCode inválido",
+        OpenCodeUnavailableReason::CacheWriteFailed => "no se pudo guardar la caché OpenCode",
+        OpenCodeUnavailableReason::ReadFailed => "lectura OpenCode fallida",
+    }
 }
 
 fn fmt_cost(cost: f64) -> String {
@@ -470,6 +590,53 @@ mod tests {
         assert!(app.status.is_some());
         assert!(app.tokens_scanning);
         assert!(!app.refreshing);
+    }
+
+    #[test]
+    fn opencode_state_is_independent_and_suppresses_duplicate_scans() {
+        let mut app = App::new();
+        assert!(app.begin_opencode_token_scan());
+        assert!(!app.begin_opencode_token_scan());
+        app.apply_update(Update::OpenCodeTokens(
+            crate::opencode_tokens::OpenCodePanelState::Empty,
+        ));
+        assert!(!app.opencode_scanning);
+        app.opencode_scanning = true;
+        app.apply_update(Update::Status(Status {
+            fetched_at: 1,
+            providers: vec![],
+        }));
+        assert!(app.status.is_some());
+        assert!(app.opencode_scanning);
+    }
+
+    #[test]
+    fn opencode_failure_keeps_previous_rows_as_stale() {
+        let mut app = App::new();
+        let rows = vec![OpenCodeUsageRow {
+            provider: "openai".into(),
+            model: "gpt-test".into(),
+            input: Some(1),
+            output: Some(2),
+            reasoning: Some(3),
+            cache_read: Some(4),
+            cache_write: Some(5),
+            total: Some(15),
+            cost: Some(0.01),
+        }];
+        app.apply_update(Update::OpenCodeTokens(OpenCodePanelState::Ready(
+            rows.clone(),
+        )));
+        app.apply_update(Update::OpenCodeTokens(OpenCodePanelState::Unavailable(
+            OpenCodeUnavailableReason::Busy,
+        )));
+        assert_eq!(
+            app.opencode_tokens,
+            OpenCodePanelState::Stale {
+                rows,
+                reason: OpenCodeUnavailableReason::Busy,
+            }
+        );
     }
 
     #[test]

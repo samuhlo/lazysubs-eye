@@ -19,6 +19,10 @@ pub fn pi_daily_index_file() -> PathBuf {
     cache_dir().join("pi-daily-token-index-v1.json")
 }
 
+pub fn opencode_daily_index_file() -> PathBuf {
+    cache_dir().join("opencode-daily-token-index-v1.json")
+}
+
 pub fn atomic_save(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     atomic_save_with_rename(path, bytes, &|from, to| std::fs::rename(from, to))
 }
@@ -73,6 +77,13 @@ pub fn save(status: &Status) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_daily_index_has_an_independent_v1_name() {
+        assert!(
+            opencode_daily_index_file().ends_with("lazysubs/opencode-daily-token-index-v1.json")
+        );
+    }
 
     #[test]
     fn atomic_save_replaces_a_complete_index() {

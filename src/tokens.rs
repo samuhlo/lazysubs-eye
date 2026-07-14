@@ -65,7 +65,9 @@ pub fn claude_today() -> Vec<ModelTokens> {
         Err(_) => return vec![],
     };
     for dir in dirs.flatten() {
-        let Ok(files) = std::fs::read_dir(dir.path()) else { continue };
+        let Ok(files) = std::fs::read_dir(dir.path()) else {
+            continue;
+        };
         for file in files.flatten() {
             let path = file.path();
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
@@ -81,9 +83,13 @@ pub fn claude_today() -> Vec<ModelTokens> {
             if mtime < midnight {
                 continue;
             }
-            let Ok(f) = std::fs::File::open(&path) else { continue };
+            let Ok(f) = std::fs::File::open(&path) else {
+                continue;
+            };
             for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
-                let Ok(entry) = serde_json::from_str::<Entry>(&line) else { continue };
+                let Ok(entry) = serde_json::from_str::<Entry>(&line) else {
+                    continue;
+                };
                 if entry.kind != "assistant" {
                     continue;
                 }
@@ -97,14 +103,18 @@ pub fn claude_today() -> Vec<ModelTokens> {
                     continue;
                 }
                 let Some(msg) = entry.message else { continue };
-                let (Some(model), Some(usage)) = (msg.model, msg.usage) else { continue };
+                let (Some(model), Some(usage)) = (msg.model, msg.usage) else {
+                    continue;
+                };
                 if model.starts_with('<') {
                     continue; // p.ej. "<synthetic>"
                 }
-                let agg = by_model.entry(model.clone()).or_insert_with(|| ModelTokens {
-                    model,
-                    ..Default::default()
-                });
+                let agg = by_model
+                    .entry(model.clone())
+                    .or_insert_with(|| ModelTokens {
+                        model,
+                        ..Default::default()
+                    });
                 agg.requests += 1;
                 agg.input += usage.input_tokens;
                 agg.output += usage.output_tokens;

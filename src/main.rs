@@ -1,4 +1,5 @@
 mod cache;
+mod opencode_tokens;
 mod output;
 mod pi_tokens;
 mod providers;
