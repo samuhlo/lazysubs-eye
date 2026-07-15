@@ -162,6 +162,17 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
 - **Decisión abierta**: idioma de la propia UI (hoy en español; el README ya
   está en inglés). Decidir antes del anuncio público.
 
+- **Feedback post-fases E (2026-07-15)** ✓: (1) `[waybar.window]` (id →
+  etiqueta, exacta o subcadena) para elegir qué ventana muestra la barra por
+  provider (afecta texto y clase); (2) los paneles de tokens Claude/Pi ya no
+  desaparecen sin uso hoy — muestran "sin uso hoy" como OpenCode (Pi "no
+  aparecía" porque no se usó hoy); (3) doble espacio tras el icono en los
+  títulos (glifos anchos como ✳) y el panel de tokens de Claude ahora se llama
+  "✳ Claude Code"; (4) **gráfica de gasto en braille** (tecla `g`, estilo btop)
+  con 3 vistas (semana/mes/horas, tecla `v`) — sustituye al sparkline como la
+  visualización buena; añade escáneres horarios de hoy. **111 tests**. Release
+  v0.12.0.
+
 ## Decisiones de diseño ya tomadas (respetar)
 
 - **Nunca refrescar tokens OAuth** de los CLIs; en 401 → mostrar "reauth".

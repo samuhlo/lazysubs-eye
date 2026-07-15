@@ -88,6 +88,40 @@ pub fn period_bounds(period: Period, today: NaiveDate) -> (String, String) {
     (start.to_string(), today.to_string())
 }
 
+/// Vista de la gráfica de gasto: días de la semana en curso, del mes en curso,
+/// o por horas de hoy.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GraphView {
+    Week,
+    Month,
+    Hours,
+}
+
+impl GraphView {
+    pub fn label(self) -> &'static str {
+        match self {
+            GraphView::Week => "semana",
+            GraphView::Month => "mes",
+            GraphView::Hours => "hoy por horas",
+        }
+    }
+
+    pub fn next(self) -> GraphView {
+        match self {
+            GraphView::Week => GraphView::Month,
+            GraphView::Month => GraphView::Hours,
+            GraphView::Hours => GraphView::Week,
+        }
+    }
+}
+
+/// Serie lista para pintar: valores + etiquetas del eje x (una por valor).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct GraphData {
+    pub values: Vec<u64>,
+    pub labels: Vec<String>,
+}
+
 // --- capa de base de datos (pura, testable con Connection en memoria) --------
 
 pub fn init_schema(conn: &Connection) -> Result<()> {
@@ -179,6 +213,22 @@ pub fn query_period(
             total: as_u64(row.get(7)?),
             cost: row.get(8)?,
         })
+    })?;
+    Ok(rows.filter_map(Result::ok).collect())
+}
+
+/// Total diario sumando **todas** las fuentes en el rango [start, end].
+pub fn all_daily_totals(conn: &Connection, start: &str, end: &str) -> Result<Vec<(String, u64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT date, SUM(total) FROM daily_usage
+         WHERE date >= ?1 AND date <= ?2
+         GROUP BY date ORDER BY date",
+    )?;
+    let rows = stmt.query_map(params![start, end], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?.max(0) as u64,
+        ))
     })?;
     Ok(rows.filter_map(Result::ok).collect())
 }
@@ -455,6 +505,86 @@ pub fn period_rows(source: &str, period: Period) -> Vec<UsageRow> {
         .unwrap_or_default()
 }
 
+/// Serie de la gráfica de gasto (todas las fuentes) para la vista dada. Vacío
+/// ante error o si el historial está desactivado.
+pub fn graph_data(view: GraphView) -> GraphData {
+    if !crate::config::get().stats.enabled {
+        return GraphData::default();
+    }
+    let today = today_local();
+    match view {
+        GraphView::Week => open()
+            .map(|conn| week_series(&conn, today))
+            .unwrap_or_default(),
+        GraphView::Month => open()
+            .map(|conn| month_series(&conn, today))
+            .unwrap_or_default(),
+        GraphView::Hours => hours_series(today_hourly_total()),
+    }
+}
+
+/// Suma por hora de hoy de las tres fuentes (Claude/Pi/OpenCode).
+fn today_hourly_total() -> [u64; 24] {
+    let claude = crate::tokens::claude_today_hourly();
+    let pi = crate::pi_tokens::scan_pi_today_hourly();
+    let opencode = crate::opencode_tokens::scan_opencode_today_hourly();
+    let mut out = [0u64; 24];
+    for h in 0..24 {
+        out[h] = claude[h] + pi[h] + opencode[h];
+    }
+    out
+}
+
+/// Días de la semana en curso (lunes→domingo), total de todas las fuentes.
+fn week_series(conn: &Connection, today: NaiveDate) -> GraphData {
+    let monday = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
+    let lookup: std::collections::HashMap<String, u64> = all_daily_totals(
+        conn,
+        &monday.to_string(),
+        &(monday + chrono::Duration::days(6)).to_string(),
+    )
+    .unwrap_or_default()
+    .into_iter()
+    .collect();
+    let labels = ["L", "M", "X", "J", "V", "S", "D"];
+    let values = (0..7)
+        .map(|i| {
+            let date = (monday + chrono::Duration::days(i)).to_string();
+            lookup.get(&date).copied().unwrap_or(0)
+        })
+        .collect();
+    GraphData {
+        values,
+        labels: labels.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// Días del mes en curso (1→hoy), total de todas las fuentes.
+fn month_series(conn: &Connection, today: NaiveDate) -> GraphData {
+    let first = today.with_day(1).unwrap_or(today);
+    let lookup: std::collections::HashMap<String, u64> =
+        all_daily_totals(conn, &first.to_string(), &today.to_string())
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+    let days = today.day();
+    let mut values = Vec::with_capacity(days as usize);
+    let mut labels = Vec::with_capacity(days as usize);
+    for d in 1..=days {
+        let date = first.with_day(d).unwrap_or(first).to_string();
+        values.push(lookup.get(&date).copied().unwrap_or(0));
+        labels.push(d.to_string());
+    }
+    GraphData { values, labels }
+}
+
+fn hours_series(hourly: [u64; 24]) -> GraphData {
+    GraphData {
+        values: hourly.to_vec(),
+        labels: (0..24).map(|h| format!("{h:02}")).collect(),
+    }
+}
+
 /// Serie diaria para el sparkline de una fuente. Vacío si está desactivado.
 pub fn sparkline(source: &str) -> Vec<u64> {
     let config = crate::config::get();
@@ -609,6 +739,67 @@ mod tests {
         assert_eq!(get_meta(&conn, "k").unwrap().as_deref(), Some("1"));
         set_meta(&conn, "k", "2").unwrap();
         assert_eq!(get_meta(&conn, "k").unwrap().as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn graphview_cicla() {
+        assert_eq!(GraphView::Week.next(), GraphView::Month);
+        assert_eq!(GraphView::Month.next(), GraphView::Hours);
+        assert_eq!(GraphView::Hours.next(), GraphView::Week);
+    }
+
+    #[test]
+    fn all_daily_totals_suma_todas_las_fuentes() {
+        let conn = mem();
+        record_day(&conn, "2026-07-13", SOURCE_CLAUDE, &[row("a", 10)]).unwrap();
+        record_day(&conn, "2026-07-13", SOURCE_PI, &[row("a", 5)]).unwrap();
+        record_day(&conn, "2026-07-14", SOURCE_OPENCODE, &[row("a", 20)]).unwrap();
+        let totals = all_daily_totals(&conn, "2026-07-13", "2026-07-14").unwrap();
+        assert_eq!(
+            totals,
+            vec![
+                ("2026-07-13".to_string(), 15),
+                ("2026-07-14".to_string(), 20)
+            ]
+        );
+    }
+
+    #[test]
+    fn week_series_lunes_a_domingo_con_ceros() {
+        let conn = mem();
+        // 2026-07-15 es miércoles; la semana va del lunes 13 al domingo 19.
+        let today = NaiveDate::from_ymd_opt(2026, 7, 15).unwrap();
+        record_day(&conn, "2026-07-13", SOURCE_CLAUDE, &[row("a", 10)]).unwrap();
+        record_day(&conn, "2026-07-13", SOURCE_PI, &[row("a", 5)]).unwrap();
+        record_day(&conn, "2026-07-14", SOURCE_CLAUDE, &[row("a", 20)]).unwrap();
+        let g = week_series(&conn, today);
+        assert_eq!(g.values, vec![15, 20, 0, 0, 0, 0, 0]);
+        assert_eq!(g.labels, vec!["L", "M", "X", "J", "V", "S", "D"]);
+    }
+
+    #[test]
+    fn month_series_del_uno_a_hoy() {
+        let conn = mem();
+        let today = NaiveDate::from_ymd_opt(2026, 7, 15).unwrap();
+        record_day(&conn, "2026-07-01", SOURCE_CLAUDE, &[row("a", 7)]).unwrap();
+        record_day(&conn, "2026-07-15", SOURCE_PI, &[row("a", 3)]).unwrap();
+        let g = month_series(&conn, today);
+        assert_eq!(g.values.len(), 15);
+        assert_eq!(g.values[0], 7);
+        assert_eq!(g.values[14], 3);
+        assert_eq!(g.labels.first().map(String::as_str), Some("1"));
+        assert_eq!(g.labels.last().map(String::as_str), Some("15"));
+    }
+
+    #[test]
+    fn hours_series_pasa_las_24() {
+        let mut hourly = [0u64; 24];
+        hourly[9] = 42;
+        let g = hours_series(hourly);
+        assert_eq!(g.values.len(), 24);
+        assert_eq!(g.values[9], 42);
+        assert_eq!(g.labels[0], "00");
+        assert_eq!(g.labels[23], "23");
     }
 
     #[test]

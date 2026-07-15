@@ -1,3 +1,4 @@
+use chrono::Timelike;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -199,6 +200,80 @@ pub fn claude_by_day() -> Vec<(String, Vec<ModelTokens>)> {
             (date, rows)
         })
         .collect()
+}
+
+/// Total de tokens de Claude por hora local de HOY (24 buckets). Para la
+/// gráfica de gasto por horas; escaneo directo de los JSONL de hoy.
+pub fn claude_today_hourly() -> [u64; 24] {
+    let mut hours = [0u64; 24];
+    let home = std::env::var("HOME").unwrap_or_default();
+    let projects = PathBuf::from(home).join(".claude/projects");
+    let today = chrono::Local::now().date_naive();
+    let midnight = today
+        .and_hms_opt(0, 0, 0)
+        .and_then(|dt| dt.and_local_timezone(chrono::Local).single())
+        .map(|dt| dt.timestamp())
+        .unwrap_or(0);
+
+    let Ok(dirs) = std::fs::read_dir(&projects) else {
+        return hours;
+    };
+    for dir in dirs.flatten() {
+        let Ok(files) = std::fs::read_dir(dir.path()) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let path = file.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+            let mtime = file
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            if mtime < midnight {
+                continue;
+            }
+            let Ok(f) = std::fs::File::open(&path) else {
+                continue;
+            };
+            for line in std::io::BufReader::new(f).lines().map_while(Result::ok) {
+                let Ok(entry) = serde_json::from_str::<Entry>(&line) else {
+                    continue;
+                };
+                if entry.kind != "assistant" {
+                    continue;
+                }
+                let Some(dt) = entry
+                    .timestamp
+                    .as_deref()
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Local))
+                else {
+                    continue;
+                };
+                if dt.date_naive() != today {
+                    continue;
+                }
+                let Some(msg) = entry.message else { continue };
+                let (Some(model), Some(usage)) = (msg.model, msg.usage) else {
+                    continue;
+                };
+                if model.starts_with('<') {
+                    continue;
+                }
+                let hour = dt.hour() as usize;
+                hours[hour] += usage.input_tokens
+                    + usage.output_tokens
+                    + usage.cache_read_input_tokens
+                    + usage.cache_creation_input_tokens;
+            }
+        }
+    }
+    hours
 }
 
 pub fn fmt_count(n: u64) -> String {

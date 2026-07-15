@@ -47,11 +47,16 @@ Daily token usage panels are also built from local data:
 | OpenCode tokens | OpenCode SQLite database in `~/.local/state/opencode` |
 
 Each panel can show **today, this week, or this month** — press `t` (or Tab) in
-the TUI to cycle the period. Usage is recorded into a local SQLite history
+the TUI to cycle the period. Empty panels show "sin uso hoy" instead of
+vanishing. Usage is recorded into a local SQLite history
 (`$XDG_STATE_HOME/lazysubs-eye/history.db`) so past days survive even when the
 source transcripts get pruned; the first run backfills whatever history the
-sources still hold. A sparkline of the daily total sits under each panel. Turn
-the whole thing off with `[stats] enabled = false` (see Configuration).
+sources still hold.
+
+Press `g` for a braille **spend graph** (btop-style) of the combined token
+total, and `v` to cycle its three views: this week's days, this month's days,
+and today by hour. Turn the whole history off with `[stats] enabled = false`
+(see Configuration).
 
 Everything runs locally: nothing is sent to third parties — only the official
 API of each provider is queried with your own credentials. lazysubs-eye **never
@@ -107,6 +112,10 @@ minimax = true
 [waybar]             # what the bar shows — independent of the TUI
 # providers = ["claude", "minimax"]   # which ones AND their order
 # percent = false                     # icons only
+
+# [waybar.window]    # which window each provider shows (by label); default is
+# claude = "semana"  # the most urgent one. Exact match, else substring —
+# codex = "semana"   # e.g. "Fable" -> "semana · Fable". Drives text and color.
 
 [tui]                # what the TUI shows
 # providers = ["minimax", "claude", "codex"]

@@ -1,6 +1,29 @@
 use crate::config;
-use crate::providers::Status;
+use crate::providers::{ProviderStatus, Status, Window};
 use serde_json::json;
+
+/// Ventana que muestra la barra para un provider: la configurada por etiqueta
+/// en `[waybar.window]` (exacta o por subcadena) o, si no, la más urgente.
+fn display_window<'a>(p: &'a ProviderStatus, config: &config::Config) -> Option<&'a Window> {
+    if let Some(want) = config.waybar.window.as_ref().and_then(|m| m.get(&p.id)) {
+        if let Some(w) = p
+            .windows
+            .iter()
+            .find(|w| w.label.eq_ignore_ascii_case(want))
+        {
+            return Some(w);
+        }
+        let want_lc = want.to_lowercase();
+        if let Some(w) = p
+            .windows
+            .iter()
+            .find(|w| w.label.to_lowercase().contains(&want_lc))
+        {
+            return Some(w);
+        }
+    }
+    p.worst()
+}
 
 pub fn countdown(resets_at: i64) -> String {
     let secs = resets_at - chrono::Utc::now().timestamp();
@@ -60,7 +83,9 @@ fn waybar_with(status: &Status, config: &config::Config) -> String {
             has_error = true;
             continue;
         }
-        let Some(worst) = p.worst() else { continue };
+        let Some(worst) = display_window(p, config) else {
+            continue;
+        };
         max_percent = max_percent.max(worst.used_percent);
         if config.waybar.percent() {
             parts.push(format!("{} {:.0}%", p.icon, worst.used_percent));
@@ -204,6 +229,53 @@ mod tests {
         let out: serde_json::Value = serde_json::from_str(&waybar_with(&status, &config)).unwrap();
         assert_eq!(out["class"], "normal");
         assert_eq!(out["percentage"], 90);
+    }
+
+    #[test]
+    fn waybar_window_elige_por_etiqueta_o_worst() {
+        let mut status = status(None, None);
+        status.providers[0].windows = vec![
+            Window {
+                label: "5h".into(),
+                used_percent: 90.0,
+                resets_at: None,
+                active: true,
+            },
+            Window {
+                label: "semana".into(),
+                used_percent: 30.0,
+                resets_at: None,
+                active: true,
+            },
+            Window {
+                label: "semana · Fable".into(),
+                used_percent: 55.0,
+                resets_at: None,
+                active: true,
+            },
+        ];
+        let mut config = crate::config::Config::default();
+
+        // sin selección → worst (5h, 90%)
+        let out: serde_json::Value = serde_json::from_str(&waybar_with(&status, &config)).unwrap();
+        assert_eq!(out["text"], "⬡ 90%");
+
+        // etiqueta exacta "semana" (no la de Fable)
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("codex".to_string(), "semana".to_string());
+        config.waybar.window = Some(map.clone());
+        let out: serde_json::Value = serde_json::from_str(&waybar_with(&status, &config)).unwrap();
+        assert_eq!(out["text"], "⬡ 30%");
+        assert_eq!(
+            out["percentage"], 30,
+            "la clase también sigue la ventana elegida"
+        );
+
+        // subcadena "Fable" → semana · Fable (55%)
+        map.insert("codex".to_string(), "Fable".to_string());
+        config.waybar.window = Some(map);
+        let out: serde_json::Value = serde_json::from_str(&waybar_with(&status, &config)).unwrap();
+        assert_eq!(out["text"], "⬡ 55%");
     }
 
     #[test]

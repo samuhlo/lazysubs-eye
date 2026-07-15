@@ -61,8 +61,14 @@ La capa de base (init/record/query/series/prune/meta) opera sobre `&Connection`
 y se testea con `Connection::open_in_memory`; los puntos de entrada abren la
 base real y **nunca rompen el flujo** (ante error → vacío). Config en `[stats]`
 (`enabled`, `default_period`, `history_days`, `sparkline`). En la TUI, `t`/Tab
-cicla el periodo de los paneles de tokens (hoy/semana/mes) y hay un `Sparkline`
-del total diario de los últimos 14 días bajo cada panel.
+cicla el periodo de los paneles de tokens (hoy/semana/mes). La tecla `g` abre
+una **gráfica de gasto** en braille (Canvas de ratatui, `Marker::Braille`, barras
+verticales estilo btop) del total combinado, y `v` cicla sus tres vistas: días de
+la semana en curso, del mes, y hoy por horas (`GraphView`). Las series diarias
+salen de `all_daily_totals`; la de horas de tres escáneres horarios de hoy
+(`claude_today_hourly` / `scan_pi_today_hourly` / `scan_opencode_today_hourly`,
+que filtran por mtime/ventana del día para no re-parsear todo el histórico). El
+cálculo va en un hilo aparte (`Update::Graph`).
 
 ### --check (main.rs)
 

@@ -124,6 +124,11 @@ pub struct Waybar {
     pub providers: Option<Vec<String>>,
     /// En false la barra muestra solo los iconos, sin porcentaje.
     pub percent: Option<bool>,
+    /// Qué ventana muestra la barra por provider, por etiqueta (id → etiqueta,
+    /// p. ej. `{ claude = "semana" }`). Coincidencia exacta y, si no, por
+    /// subcadena ("Fable" → "semana · Fable"). Ausente/sin match = la más
+    /// urgente (worst).
+    pub window: Option<std::collections::BTreeMap<String, String>>,
 }
 
 impl Waybar {

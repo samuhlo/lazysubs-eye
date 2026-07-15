@@ -1,4 +1,4 @@
-use crate::history::{self, Period};
+use crate::history::{self, GraphData, GraphView, Period};
 use crate::opencode_tokens::{
     self, OpenCodePanelState, OpenCodeUnavailableReason, OpenCodeUsageRow,
 };
@@ -13,6 +13,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
 use ratatui::text::{Line, Span};
+use ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
 use ratatui::widgets::{
     Block, BorderType, Clear, LineGauge, Padding, Paragraph, Row, Sparkline, Table,
 };
@@ -40,6 +41,8 @@ enum Update {
     OpenCodeTokens(OpenCodePanelState),
     /// El backfill del historial terminó; toca recargar los agregados.
     Backfilled,
+    /// Datos de la gráfica de gasto (para la vista pedida).
+    Graph(GraphView, GraphData),
 }
 
 struct App {
@@ -60,6 +63,10 @@ struct App {
     history_rows: HashMap<&'static str, Vec<history::UsageRow>>,
     /// Serie diaria (sparkline) por fuente.
     history_spark: HashMap<&'static str, Vec<u64>>,
+    /// Gráfica de gasto: abierta o no, vista actual y datos (None = cargando).
+    graph_open: bool,
+    graph_view: GraphView,
+    graph_data: Option<GraphData>,
     /// Cursor del panel de opciones; None = cerrado.
     settings_cursor: Option<usize>,
     settings_error: Option<String>,
@@ -173,9 +180,22 @@ impl App {
             period,
             history_rows: HashMap::new(),
             history_spark: HashMap::new(),
+            graph_open: false,
+            graph_view: GraphView::Week,
+            graph_data: None,
             settings_cursor: None,
             settings_error: None,
         }
+    }
+
+    /// Recarga (en segundo plano) los datos de la gráfica para la vista actual.
+    fn reload_graph(&mut self) {
+        self.graph_data = None; // "cargando…" hasta que llegue
+        let view = self.graph_view;
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Update::Graph(view, history::graph_data(view)));
+        });
     }
 
     /// Recarga los agregados del historial (filas del periodo + sparkline) de
@@ -415,7 +435,18 @@ impl App {
                 }
                 self.reload_source_history(history::SOURCE_OPENCODE);
             }
-            Update::Backfilled => self.reload_history(),
+            Update::Backfilled => {
+                self.reload_history();
+                if self.graph_open {
+                    self.reload_graph();
+                }
+            }
+            Update::Graph(view, data) => {
+                // Ignora respuestas de una vista ya cambiada.
+                if view == self.graph_view {
+                    self.graph_data = Some(data);
+                }
+            }
         }
     }
 
@@ -446,12 +477,25 @@ impl App {
                                 _ => {}
                             }
                         } else {
+                            let stats_on = crate::config::get().stats.enabled;
                             match key.code {
                                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                                 KeyCode::Char('r') => self.refresh(true),
                                 KeyCode::Char('o') => self.settings_cursor = Some(1),
+                                KeyCode::Char('g') if stats_on => {
+                                    self.graph_open = !self.graph_open;
+                                    if self.graph_open {
+                                        self.reload_graph();
+                                    }
+                                }
+                                KeyCode::Char('v') | KeyCode::Left | KeyCode::Right
+                                    if self.graph_open =>
+                                {
+                                    self.graph_view = self.graph_view.next();
+                                    self.reload_graph();
+                                }
                                 KeyCode::Char('t') | KeyCode::Tab
-                                    if crate::config::get().stats.enabled =>
+                                    if stats_on && !self.graph_open =>
                                 {
                                     self.period = self.period.next();
                                     self.reload_history();
@@ -481,9 +525,14 @@ impl App {
 
         let tui_config = &crate::config::get().tui;
         let providers = providers::select(&status.providers, &tui_config.providers);
-        let panels: Vec<usize> = (0..PANELS.len())
-            .filter(|&idx| self.token_panel_shown(idx, tui_config))
-            .collect();
+        // Con la gráfica abierta, ocupa el sitio de los paneles de tokens.
+        let panels: Vec<usize> = if self.graph_open {
+            vec![]
+        } else {
+            (0..PANELS.len())
+                .filter(|&idx| self.token_panel_shown(idx, tui_config))
+                .collect()
+        };
 
         let mut constraints = vec![Constraint::Length(1)]; // cabecera
         for p in &providers {
@@ -492,7 +541,7 @@ impl App {
         for &idx in &panels {
             constraints.push(Constraint::Length(self.token_panel_height(idx)));
         }
-        constraints.push(Constraint::Min(0)); // relleno
+        constraints.push(Constraint::Min(0)); // relleno (o la gráfica)
         constraints.push(Constraint::Length(1)); // pie
         let areas = Layout::vertical(constraints).split(f.area());
 
@@ -503,10 +552,37 @@ impl App {
         for (section, &idx) in (providers.len() + 1..).zip(panels.iter()) {
             self.draw_token_panel(f, areas[section], idx);
         }
+        if self.graph_open {
+            // El penúltimo área es el relleno Min(0): ahí va la gráfica.
+            self.draw_graph(f, areas[areas.len() - 2]);
+        }
         self.draw_footer(f, areas[areas.len() - 1], status);
         if self.settings_cursor.is_some() {
             self.draw_settings(f);
         }
+    }
+
+    fn draw_graph(&self, f: &mut Frame, area: Rect) {
+        let title = format!(" ✳  gasto · {} ", self.graph_view.label());
+        let block = bordered(title).padding(Padding::horizontal(1));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let Some(data) = &self.graph_data else {
+            f.render_widget(Paragraph::new("cargando…").fg_dim(), inner);
+            return;
+        };
+        if data.values.iter().all(|&v| v == 0) {
+            f.render_widget(Paragraph::new("sin gasto en este periodo").fg_dim(), inner);
+            return;
+        }
+        if inner.height < 2 {
+            return;
+        }
+        let [chart, labels] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+        draw_braille_bars(f, chart, &data.values);
+        draw_graph_labels(f, labels, &data.labels);
     }
 
     fn draw_settings(&self, f: &mut Frame) {
@@ -574,23 +650,14 @@ impl App {
         );
     }
 
-    /// Un panel de tokens se muestra si su panel está activo y, en "hoy", si
-    /// tiene datos que enseñar (en semana/mes siempre, con "sin datos" si toca).
+    /// Un panel de tokens se muestra si su panel está activo. Vacío ⇒ "sin uso
+    /// hoy" (los tres paneles se comportan igual, para que Pi/Claude no
+    /// desaparezcan en días sin uso).
     fn token_panel_shown(&self, idx: usize, tui: &crate::config::Tui) -> bool {
-        if !tui.panel(PANEL_IDS[idx]) {
-            return false;
-        }
-        if self.period != Period::Today {
-            return true;
-        }
-        match idx {
-            0 => !self.tokens.is_empty(),
-            1 => !self.pi_tokens.is_empty(),
-            _ => true, // opencode siempre pinta (estado o tabla)
-        }
+        tui.panel(PANEL_IDS[idx])
     }
 
-    /// Nº de filas de cuerpo (cabecera + datos, o el mensaje de estado).
+    /// Nº de filas de cuerpo (cabecera + datos, o una línea de mensaje si vacío).
     fn body_lines(&self, idx: usize) -> u16 {
         if self.period != Period::Today {
             let rows = self
@@ -601,7 +668,9 @@ impl App {
             return 1 + rows.max(1) as u16; // cabecera + al menos una fila/mensaje
         }
         match idx {
+            0 if self.tokens.is_empty() => 1,
             0 => 1 + self.tokens.len() as u16,
+            1 if self.pi_tokens.is_empty() => 1,
             1 => 1 + self.pi_tokens.len() as u16,
             _ => match &self.opencode_tokens {
                 OpenCodePanelState::Ready(rows) | OpenCodePanelState::Stale { rows, .. } => {
@@ -625,7 +694,8 @@ impl App {
     }
 
     fn panel_title(&self, idx: usize) -> String {
-        const BASES: [&str; 3] = ["✳ tokens", "Pi", "OpenCode"];
+        // Doble espacio tras el ✳ porque en muchas fuentes es un glifo ancho.
+        const BASES: [&str; 3] = ["✳  Claude Code", "Pi", "OpenCode"];
         let base = BASES[idx];
         // Nota de datos rancios solo en el panel OpenCode de hoy.
         if idx == 2 && self.period == Period::Today {
@@ -671,6 +741,14 @@ impl App {
     }
 
     fn draw_today_body(&self, f: &mut Frame, area: Rect, idx: usize) {
+        // Vacío hoy → mensaje (como OpenCode), para que el panel no desaparezca.
+        if (idx == 0 && self.tokens.is_empty()) || (idx == 1 && self.pi_tokens.is_empty()) {
+            f.render_widget(
+                Paragraph::new("sin uso hoy").style(Style::new().fg(DIM)),
+                area,
+            );
+            return;
+        }
         match idx {
             0 => {
                 let header = Row::new(vec!["modelo", "req", "in", "out", "cache→", "cache+"])
@@ -806,11 +884,23 @@ impl App {
             Span::styled("opciones", Style::new().fg(DIM)),
         ];
         if crate::config::get().stats.enabled {
-            spans.push(Span::styled("  t ", Style::new().fg(ACCENT)));
-            spans.push(Span::styled(
-                format!("periodo · {}", self.period.label()),
-                Style::new().fg(DIM),
-            ));
+            if self.graph_open {
+                spans.push(Span::styled("  g ", Style::new().fg(ACCENT)));
+                spans.push(Span::styled("cerrar  ", Style::new().fg(DIM)));
+                spans.push(Span::styled("v ", Style::new().fg(ACCENT)));
+                spans.push(Span::styled(
+                    format!("vista · {}", self.graph_view.label()),
+                    Style::new().fg(DIM),
+                ));
+            } else {
+                spans.push(Span::styled("  t ", Style::new().fg(ACCENT)));
+                spans.push(Span::styled(
+                    format!("periodo · {}  ", self.period.label()),
+                    Style::new().fg(DIM),
+                ));
+                spans.push(Span::styled("g ", Style::new().fg(ACCENT)));
+                spans.push(Span::styled("gráfica", Style::new().fg(DIM)));
+            }
         }
         f.render_widget(Paragraph::new(Line::from(spans)), left);
         let state = if self.refreshing {
@@ -889,6 +979,73 @@ fn unavailable_text(reason: OpenCodeUnavailableReason) -> &'static str {
 fn fmt_cost(cost: f64) -> String {
     let value = format!("{cost:.4}");
     value.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+/// Barras verticales en braille (estilo btop) de una serie de totales.
+fn draw_braille_bars(f: &mut Frame, area: Rect, values: &[u64]) {
+    let n = values.len();
+    if n == 0 {
+        return;
+    }
+    let max = values.iter().copied().max().unwrap_or(1).max(1) as f64;
+    let color = if crate::config::get().colors {
+        ACCENT
+    } else {
+        Color::Reset
+    };
+    // Ancho de un punto braille en unidades de x, para rellenar cada barra con
+    // columnas contiguas (barras llenas estilo btop en vez de una línea fina).
+    let dot_dx = (n as f64 / (area.width.max(1) as f64 * 2.0)).max(f64::EPSILON);
+    let canvas = Canvas::default()
+        .marker(symbols::Marker::Braille)
+        .x_bounds([0.0, n as f64])
+        .y_bounds([0.0, max])
+        .paint(move |ctx| {
+            for (i, &v) in values.iter().enumerate() {
+                if v == 0 {
+                    continue;
+                }
+                // La barra ocupa el 70% central del bucket.
+                let mut x = i as f64 + 0.15;
+                let end = i as f64 + 0.85;
+                while x <= end {
+                    ctx.draw(&CanvasLine {
+                        x1: x,
+                        y1: 0.0,
+                        x2: x,
+                        y2: v as f64,
+                        color,
+                    });
+                    x += dot_dx;
+                }
+            }
+        });
+    f.render_widget(canvas, area);
+}
+
+/// Fila de etiquetas del eje x, centradas bajo cada barra y sin solaparse
+/// (así las vistas densas —mes, horas— muestran solo las que caben).
+fn draw_graph_labels(f: &mut Frame, area: Rect, labels: &[String]) {
+    let w = area.width as usize;
+    let n = labels.len();
+    if w == 0 || n == 0 {
+        return;
+    }
+    let mut buf = vec![' '; w];
+    let mut last_end = 0usize;
+    for (i, label) in labels.iter().enumerate() {
+        let len = label.chars().count();
+        let center = ((i as f64 + 0.5) * w as f64 / n as f64) as usize;
+        let start = center.saturating_sub(len / 2).min(w.saturating_sub(len));
+        if start >= last_end && start + len <= w {
+            for (k, ch) in label.chars().enumerate() {
+                buf[start + k] = ch;
+            }
+            last_end = start + len + 1; // un espacio de separación mínimo
+        }
+    }
+    let text: String = buf.into_iter().collect();
+    f.render_widget(Paragraph::new(text).style(Style::new().fg(DIM)), area);
 }
 
 /// Recorta cuentas largas (emails) para que quepan en el título del panel.
@@ -1018,7 +1175,8 @@ fn draw_provider(f: &mut Frame, area: Rect, p: &ProviderStatus) {
         bits.push(format!("datos de hace {}", crate::output::age(since)));
     }
     let plan_title = format!(" {} ", bits.join(" · "));
-    let block = bordered(format!(" {} {} ", p.icon, p.name))
+    // Doble espacio tras el icono: glifos como ✳ son anchos en muchas fuentes.
+    let block = bordered(format!(" {}  {} ", p.icon, p.name))
         .title(Span::styled(plan_title, Style::new().fg(DIM)));
     let inner = block.inner(area);
     f.render_widget(block, area);

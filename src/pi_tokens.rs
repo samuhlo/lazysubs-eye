@@ -1,5 +1,5 @@
 use crate::cache;
-use chrono::{Local, TimeZone};
+use chrono::{Local, TimeZone, Timelike};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::cell::Cell;
@@ -641,6 +641,56 @@ pub fn scan_pi_all_days() -> Vec<(String, Vec<PiUsageRow>)> {
             (date, rows)
         })
         .collect()
+}
+
+/// Total de tokens de Pi por hora local de HOY (24 buckets). Para la gráfica
+/// de gasto por horas; escaneo directo, deduplicando por id de entrada.
+pub fn scan_pi_today_hourly() -> [u64; 24] {
+    let mut hours = [0u64; 24];
+    let Some(root) = pi_sessions_root() else {
+        return hours;
+    };
+    let today = Local::now().date_naive();
+    let midnight = today
+        .and_hms_opt(0, 0, 0)
+        .and_then(|dt| dt.and_local_timezone(Local).single())
+        .map(|dt| dt.timestamp())
+        .unwrap_or(0);
+    let mut paths = Vec::new();
+    walk(&root, &mut paths);
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for path in paths {
+        // Solo ficheros tocados hoy: el filtro fino sigue siendo el timestamp
+        // de cada entrada. Evita re-parsear todo el histórico de sesiones.
+        let modified_today = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64 >= midnight)
+            .unwrap_or(false);
+        if !modified_today {
+            continue;
+        }
+        let Ok(file) = std::fs::File::open(&path) else {
+            continue;
+        };
+        for line in BufReader::new(file).lines().map_while(Result::ok) {
+            let Some(entry) = parse_pi_line(&line) else {
+                continue;
+            };
+            if !seen.insert(entry.id.clone()) {
+                continue;
+            }
+            let Some(dt) = Local.timestamp_millis_opt(entry.timestamp_ms).single() else {
+                continue;
+            };
+            if dt.date_naive() != today {
+                continue;
+            }
+            hours[dt.hour() as usize] += entry.totals.total_tokens;
+        }
+    }
+    hours
 }
 
 #[cfg(test)]

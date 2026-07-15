@@ -1,5 +1,5 @@
 use crate::cache;
-use chrono::{DateTime, Local, TimeZone};
+use chrono::{DateTime, Local, TimeZone, Timelike};
 use rusqlite::{types::Value, Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,6 +58,26 @@ WITH projected AS (
 )
 SELECT time_created, provider_id, model_id, input_tokens, output_tokens,
        reasoning_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost
+FROM projected WHERE part_type = 'step-finish' AND message_role = 'assistant'";
+
+/// Filas step-finish de una ventana temporal [?1, ?2) con su time_created y
+/// totales, para agrupar por hora. Para la gráfica de gasto por horas.
+const SQL_HOURLY: &str = "
+WITH projected AS (
+  SELECT p.time_created AS time_created,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.tokens.input') END AS input_tokens,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.tokens.output') END AS output_tokens,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.tokens.reasoning') END AS reasoning_tokens,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.tokens.cache.read') END AS cache_read_tokens,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.tokens.cache.write') END AS cache_write_tokens,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.tokens.total') END AS total_tokens,
+         CASE WHEN json_valid(p.data) THEN json_extract(p.data, '$.type') END AS part_type,
+         CASE WHEN json_valid(m.data) THEN json_extract(m.data, '$.role') END AS message_role
+  FROM part AS p JOIN message AS m ON m.id = p.message_id
+  WHERE p.time_created >= ?1 AND p.time_created < ?2
+)
+SELECT time_created, input_tokens, output_tokens, reasoning_tokens,
+       cache_read_tokens, cache_write_tokens, total_tokens
 FROM projected WHERE part_type = 'step-finish' AND message_role = 'assistant'";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -872,6 +892,62 @@ pub fn scan_opencode_all_days() -> Vec<(String, Vec<OpenCodeUsageRow>)> {
         .into_iter()
         .filter_map(|(date, rows)| aggregate_projected_rows(rows).ok().map(|rows| (date, rows)))
         .collect()
+}
+
+/// Total de tokens de OpenCode por hora local de HOY (24 buckets). Para la
+/// gráfica de gasto por horas; best-effort (ceros ante cualquier fallo).
+pub fn scan_opencode_today_hourly() -> [u64; 24] {
+    let mut hours = [0u64; 24];
+    let path = match resolve_opencode_db(&EnvSnapshot::current()) {
+        DbResolution::File(path) => path,
+        _ => return hours,
+    };
+    let Ok(connection) = open_read_only(&path) else {
+        return hours;
+    };
+    if validate_schema(&connection).is_err() {
+        return hours;
+    }
+    let day = DayWindow::at(Local::now());
+    let Ok(mut statement) = connection.prepare(SQL_HOURLY) else {
+        return hours;
+    };
+    let mapped = statement.query_map([day.start_ms, day.next_start_ms], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Value>(1)?,
+            row.get::<_, Value>(2)?,
+            row.get::<_, Value>(3)?,
+            row.get::<_, Value>(4)?,
+            row.get::<_, Value>(5)?,
+            row.get::<_, Value>(6)?,
+        ))
+    });
+    let Ok(rows) = mapped else {
+        return hours;
+    };
+    for row in rows.flatten() {
+        let (time_created, input, output, reasoning, cache_read, cache_write, total) = row;
+        let Some(dt) = Local.timestamp_millis_opt(time_created).single() else {
+            continue;
+        };
+        let projected = ProjectedRow {
+            part_id: String::new(),
+            provider: String::new(),
+            model: String::new(),
+            input: value_token(input).unwrap_or(None),
+            output: value_token(output).unwrap_or(None),
+            reasoning: value_token(reasoning).unwrap_or(None),
+            cache_read: value_token(cache_read).unwrap_or(None),
+            cache_write: value_token(cache_write).unwrap_or(None),
+            total: value_token(total).unwrap_or(None),
+            cost: None,
+        };
+        if let Ok(Some(t)) = effective_total(&projected) {
+            hours[dt.hour() as usize] += t;
+        }
+    }
+    hours
 }
 
 #[cfg(test)]
