@@ -14,7 +14,7 @@ optdepends=(
   'xdg-terminal-exec: left-click TUI launcher outside Omarchy'
 )
 source=("$url/releases/download/v$pkgver/lazysubs-eye-$pkgver-x86_64-linux-musl.tar.gz")
-sha256sums=('4ede2c0419c60cbcb94151494e42817a1ab8d7582ddf746365ce335c885dc633')
+sha256sums=('0c5aedd1d51e7f0914bcf071134a0987998a3dcc17c17db7e88b24a781d1a744')
 
 package() {
   cd "lazysubs-eye-$pkgver-x86_64-linux-musl"
