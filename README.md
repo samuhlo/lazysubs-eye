@@ -1,6 +1,7 @@
 # lazysubs-eye
 
-AI subscription quota monitor for [Omarchy](https://omarchy.org), lazygit-style.
+AI subscription quota monitor for any Linux with [waybar](https://github.com/Alexays/Waybar),
+lazygit-style — polished for [Omarchy](https://omarchy.org) but not tied to it.
 Shows the rate-limit windows (5h session, weekly…) of your AI CLIs in waybar
 and in a TUI, plus a per-model breakdown of the tokens you've burned today.
 
@@ -192,17 +193,37 @@ see `packaging/aur/PKGBUILD`):
 cargo install --path .
 ```
 
-Then let lazysubs-eye wire itself into your Omarchy setup:
+Then let lazysubs-eye wire itself into your waybar setup:
 
 ```
 lazysubs-eye install
 ```
 
 This inserts the waybar module (first in `modules-right`), theme-neutral CSS
-and the Hyprland windowrule for the floating TUI, then reloads both. Every
-touched file gets a `.bak.<epoch>` backup, everything inserted is fenced with
-`lazysubs-eye-begin`/`lazysubs-eye-end` markers, and `lazysubs-eye uninstall` reverts it
-byte for byte. Use `--signal N` if RTMIN+11 collides with another module.
+and — on Hyprland — the windowrule for the floating TUI, then reloads waybar.
+Every touched file gets a `.bak.<epoch>` backup, everything inserted is fenced
+with `lazysubs-eye-begin`/`lazysubs-eye-end` markers, and `lazysubs-eye uninstall`
+reverts it byte for byte. Use `--signal N` if RTMIN+11 collides with another
+module.
+
+### Other Linux setups
+
+Omarchy is the premium target, not a requirement — `install` degrades
+gracefully anywhere waybar runs. When Omarchy isn't detected (no
+`~/.local/share/omarchy` and no `omarchy` on `PATH`) it:
+
+- finds the waybar config as either `config.jsonc` or plain `config`;
+- writes neutral hex colors for the `error` class instead of Omarchy's
+  `alpha(@foreground, …)` (which the theme import defines);
+- picks the left-click launcher from `xdg-terminal-exec` (freedesktop) or the
+  first of `foot`/`alacritty`/`kitty`/`ghostty` found — install it if the
+  module has no `on-click`;
+- reloads with `pkill -SIGUSR2 waybar`, falling back to
+  `systemctl --user try-restart waybar.service`;
+- adds the floating window rule only if `~/.config/hypr/hyprland.conf` exists.
+
+On sway/river the float rule is skipped; add the equivalent for your compositor
+by hand (e.g. sway: `for_window [app_id="org.omarchy.lazysubs-eye"] floating enable`).
 
 ## Waybar integration (manual)
 
@@ -219,10 +240,13 @@ What `lazysubs-eye install` sets up, if you prefer to do it by hand:
 }
 ```
 
+(Outside Omarchy, set `on-click` to a terminal command instead, e.g.
+`xdg-terminal-exec lazysubs-eye` or `alacritty -e lazysubs-eye`.)
+
 Emitted CSS classes: `normal`, `warning` (≥80 %), `critical` (≥95 %), `error`.
 Manual refresh from any script: `pkill -RTMIN+11 waybar`.
-Left click opens (or focuses) the TUI in a floating terminal. That needs this
-rule in `~/.config/hypr/hyprland.conf` so the window floats centered:
+Left click opens (or focuses) the TUI in a floating terminal. On Hyprland that
+needs this rule in `~/.config/hypr/hyprland.conf` so the window floats centered:
 
 ```
 windowrule = tag +floating-window, match:class org.omarchy.lazysubs-eye

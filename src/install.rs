@@ -19,14 +19,50 @@ struct ConfigPaths {
     hyprland_conf: PathBuf,
 }
 
+/// Omarchy detectado: existe `~/.local/share/omarchy` o hay `omarchy` en PATH.
+/// Guía todos los fallbacks (CSS, on-click, recarga, windowrule).
+fn is_omarchy() -> bool {
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+    if data.map(|d| d.join("omarchy").exists()).unwrap_or(false) {
+        return true;
+    }
+    which("omarchy").is_some()
+}
+
+/// Primer directorio del PATH que contiene un ejecutable `name`.
+fn which(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// El config de waybar puede llamarse `config.jsonc` (Omarchy) o `config` a
+/// secas (nombre estándar de waybar). Se prefiere el que exista; si no existe
+/// ninguno, se devuelve la ruta `.jsonc` para que el error sea claro.
+fn resolve_waybar_config(waybar_dir: &Path) -> PathBuf {
+    let jsonc = waybar_dir.join("config.jsonc");
+    let plain = waybar_dir.join("config");
+    if jsonc.exists() {
+        jsonc
+    } else if plain.exists() {
+        plain
+    } else {
+        jsonc
+    }
+}
+
 fn config_paths() -> Result<ConfigPaths> {
     let config_home = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .context("ni XDG_CONFIG_HOME ni HOME están definidos")?;
+    let waybar_dir = config_home.join("waybar");
     Ok(ConfigPaths {
-        waybar_config: config_home.join("waybar/config.jsonc"),
-        waybar_style: config_home.join("waybar/style.css"),
+        waybar_config: resolve_waybar_config(&waybar_dir),
+        waybar_style: waybar_dir.join("style.css"),
         hyprland_conf: config_home.join("hypr/hyprland.conf"),
     })
 }
@@ -52,31 +88,75 @@ fn exec_path() -> String {
     }
 }
 
-fn module_definition(exec: &str, signal: u8) -> String {
+/// Comando terminal para lanzar la TUI fuera de Omarchy. Preferimos el
+/// estándar freedesktop `xdg-terminal-exec`; si no, el primer terminal conocido
+/// con su invocación correcta. `None` = ningún terminal detectado.
+fn fallback_launch(has_xdg_term: bool, terminal: Option<&str>) -> Option<String> {
+    if has_xdg_term {
+        return Some("xdg-terminal-exec lazysubs-eye".into());
+    }
+    // foot y kitty aceptan el comando directo; alacritty y ghostty usan -e.
+    match terminal? {
+        "foot" => Some("foot lazysubs-eye".into()),
+        "kitty" => Some("kitty lazysubs-eye".into()),
+        term => Some(format!("{term} -e lazysubs-eye")),
+    }
+}
+
+fn detect_launch() -> Option<String> {
+    let has_xdg = which("xdg-terminal-exec").is_some();
+    let terminal = ["foot", "alacritty", "kitty", "ghostty"]
+        .into_iter()
+        .find(|t| which(t).is_some());
+    fallback_launch(has_xdg, terminal)
+}
+
+/// Comando `on-click` de la TUI: launch-or-focus en Omarchy, terminal genérico
+/// fuera. `None` si no hay forma de abrir (se instala sin on-click).
+fn on_click(omarchy: bool) -> Option<String> {
+    if omarchy {
+        Some("omarchy-launch-or-focus-tui lazysubs-eye".into())
+    } else {
+        detect_launch()
+    }
+}
+
+fn module_definition(exec: &str, signal: u8, on_click: Option<&str>) -> String {
+    let click_line = on_click
+        .map(|c| format!("\n    \"on-click\": \"{c}\","))
+        .unwrap_or_default();
     format!(
         r#"  // lazysubs-eye-begin
   "{MODULE_KEY}": {{
     "exec": "{exec} --waybar",
     "return-type": "json",
     "interval": 60,
-    "signal": {signal},
-    "on-click": "omarchy-launch-or-focus-tui lazysubs-eye",
+    "signal": {signal},{click_line}
     "on-click-right": "{exec} --no-cache --waybar >/dev/null && pkill -RTMIN+{signal} waybar"
   }}"#
     )
 }
 
-fn style_block() -> String {
-    // Colores neutros: heredan del tema activo de Omarchy vía @foreground
-    // (definido por el @import del tema en style.css). warning/critical llevan
-    // hex propios porque los temas solo exponen foreground/background.
-    "\n/* lazysubs-eye-begin */\n\
-     #custom-ai-usage {\n  margin: 0 8px;\n}\n\n\
-     #custom-ai-usage.warning {\n  color: #e5c07b;\n}\n\n\
-     #custom-ai-usage.critical {\n  color: #e06c75;\n}\n\n\
-     #custom-ai-usage.error {\n  color: alpha(@foreground, 0.6);\n}\n\
-     /* lazysubs-eye-end */\n"
-        .to_string()
+fn style_block(omarchy: bool) -> String {
+    // La clase `error` usa `alpha(@foreground, …)` en Omarchy (el @import del
+    // tema define @foreground); fuera de Omarchy no existe esa variable, así que
+    // se usa un gris hex neutro. warning/critical llevan hex propios siempre.
+    let error_color = if omarchy {
+        "alpha(@foreground, 0.6)"
+    } else {
+        "#9a9a9a"
+    };
+    // Sin salto inicial: cada línea del bloque lleva marcador o queda dentro de
+    // begin…end, de modo que `uninstall` lo revierta byte a byte (el separador
+    // con el CSS previo lo pone install según haga falta).
+    format!(
+        "/* lazysubs-eye-begin */\n\
+         #custom-ai-usage {{\n  margin: 0 8px;\n}}\n\n\
+         #custom-ai-usage.warning {{\n  color: #e5c07b;\n}}\n\n\
+         #custom-ai-usage.critical {{\n  color: #e06c75;\n}}\n\n\
+         #custom-ai-usage.error {{\n  color: {error_color};\n}}\n\
+         /* lazysubs-eye-end */\n"
+    )
 }
 
 /// Inserta la entrada en `modules-right` y la definición del módulo en el
@@ -202,12 +282,47 @@ fn write_with_backup(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-fn reload() {
+fn reload(omarchy: bool, touched_hypr: bool) {
     println!("recargando…");
-    let waybar = Command::new("omarchy").args(["restart", "waybar"]).output();
-    if !waybar.map(|o| o.status.success()).unwrap_or(false) {
-        println!("  ⚠ no pude ejecutar `omarchy restart waybar`; reinicia waybar a mano");
+    reload_waybar(omarchy);
+    if touched_hypr {
+        reload_hyprland();
     }
+}
+
+fn reload_waybar(omarchy: bool) {
+    if omarchy {
+        let ok = Command::new("omarchy")
+            .args(["restart", "waybar"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !ok {
+            println!("  ⚠ no pude ejecutar `omarchy restart waybar`; reinicia waybar a mano");
+        }
+        return;
+    }
+    // Fuera de Omarchy: SIGUSR2 hace que waybar recargue su config. Si no hay
+    // proceso, probamos el servicio de usuario; si tampoco, lo decimos.
+    let signaled = Command::new("pkill")
+        .args(["-SIGUSR2", "waybar"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if signaled {
+        return;
+    }
+    let restarted = Command::new("systemctl")
+        .args(["--user", "try-restart", "waybar.service"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !restarted {
+        println!("  ⚠ waybar no parece estar corriendo; arráncalo para ver el módulo");
+    }
+}
+
+fn reload_hyprland() {
     let hypr = Command::new("hyprctl").arg("reload").output();
     if hypr.map(|o| o.status.success()).unwrap_or(false) {
         if let Ok(out) = Command::new("hyprctl").arg("configerrors").output() {
@@ -228,18 +343,32 @@ pub fn install(signal: u8) -> Result<()> {
     }
     let paths = config_paths()?;
     let exec = exec_path();
+    let omarchy = is_omarchy();
     let mut changed = false;
+    if !omarchy {
+        println!("  · Omarchy no detectado: uso CSS neutro y fallbacks genéricos de waybar");
+    }
 
-    // waybar config.jsonc
+    // waybar config (config.jsonc en Omarchy, o `config` a secas)
     let config = std::fs::read_to_string(&paths.waybar_config)
         .with_context(|| format!("no pude leer {:?}", paths.waybar_config))?;
+    let click = on_click(omarchy);
+    if click.is_none() {
+        println!(
+            "  ⚠ sin terminal detectado para abrir la TUI; instalo el módulo sin on-click \
+             (instala xdg-terminal-exec o un terminal como foot/alacritty/kitty/ghostty)"
+        );
+    }
     if config.contains(MODULE_KEY) {
         println!(
             "  · módulo waybar ya presente, no toco {}",
             paths.waybar_config.display()
         );
     } else {
-        match waybar_config_with_module(&config, &module_definition(&exec, signal)) {
+        match waybar_config_with_module(
+            &config,
+            &module_definition(&exec, signal, click.as_deref()),
+        ) {
             Some(updated) => {
                 write_with_backup(&paths.waybar_config, &updated)?;
                 changed = true;
@@ -249,13 +378,13 @@ pub fn install(signal: u8) -> Result<()> {
                     "  ⚠ no reconozco la estructura de {}; añade esto a mano:\n\n\
                      \"{MODULE_KEY}\" en modules-right, y el módulo:\n{}\n",
                     paths.waybar_config.display(),
-                    module_definition(&exec, signal)
+                    module_definition(&exec, signal, click.as_deref())
                 );
             }
         }
     }
 
-    // waybar style.css
+    // waybar style.css (CSS neutro fuera de Omarchy: sin @foreground)
     let style = std::fs::read_to_string(&paths.waybar_style)
         .with_context(|| format!("no pude leer {:?}", paths.waybar_style))?;
     if style.contains("#custom-ai-usage") {
@@ -264,30 +393,48 @@ pub fn install(signal: u8) -> Result<()> {
             paths.waybar_style.display()
         );
     } else {
-        write_with_backup(&paths.waybar_style, &format!("{style}{}", style_block()))?;
-        changed = true;
-    }
-
-    // hyprland.conf (ventana flotante para la TUI)
-    let hypr = std::fs::read_to_string(&paths.hyprland_conf)
-        .with_context(|| format!("no pude leer {:?}", paths.hyprland_conf))?;
-    if hypr.contains("org.omarchy.lazysubs-eye") {
-        println!(
-            "  · windowrule ya presente, no toco {}",
-            paths.hyprland_conf.display()
-        );
-    } else {
-        let sep = if hypr.ends_with('\n') { "" } else { "\n" };
+        let sep = if style.is_empty() || style.ends_with('\n') {
+            ""
+        } else {
+            "\n"
+        };
         write_with_backup(
-            &paths.hyprland_conf,
-            &format!("{hypr}{sep}\n{WINDOWRULE} # lazysubs-eye\n"),
+            &paths.waybar_style,
+            &format!("{style}{sep}{}", style_block(omarchy)),
         )?;
         changed = true;
     }
 
+    // hyprland.conf: la windowrule flotante solo si Hyprland está configurado.
+    // En otros compositores (sway, river…) se omite (ver README).
+    let mut touched_hypr = false;
+    if paths.hyprland_conf.exists() {
+        let hypr = std::fs::read_to_string(&paths.hyprland_conf)
+            .with_context(|| format!("no pude leer {:?}", paths.hyprland_conf))?;
+        if hypr.contains("org.omarchy.lazysubs-eye") {
+            println!(
+                "  · windowrule ya presente, no toco {}",
+                paths.hyprland_conf.display()
+            );
+        } else {
+            let sep = if hypr.ends_with('\n') { "" } else { "\n" };
+            write_with_backup(
+                &paths.hyprland_conf,
+                &format!("{hypr}{sep}\n{WINDOWRULE} # lazysubs-eye\n"),
+            )?;
+            changed = true;
+            touched_hypr = true;
+        }
+    } else {
+        println!(
+            "  · sin ~/.config/hypr/hyprland.conf: omito la windowrule flotante \
+             (si usas sway/river, mira \"Other Linux setups\" en el README)"
+        );
+    }
+
     if changed {
-        reload();
-        println!("listo. El módulo aparece en waybar; click izquierdo abre la TUI flotante.");
+        reload(omarchy, touched_hypr);
+        println!("listo. El módulo aparece en waybar; click izquierdo abre la TUI.");
     } else {
         println!("nada que hacer: la integración ya estaba completa.");
     }
@@ -321,6 +468,7 @@ pub fn uninstall() -> Result<()> {
         }
     }
 
+    let mut touched_hypr = false;
     if let Ok(text) = std::fs::read_to_string(&paths.hyprland_conf) {
         let kept: String = text
             .split_inclusive('\n')
@@ -329,11 +477,12 @@ pub fn uninstall() -> Result<()> {
         if kept.len() != text.len() {
             write_with_backup(&paths.hyprland_conf, &kept)?;
             changed = true;
+            touched_hypr = true;
         }
     }
 
     if changed {
-        reload();
+        reload(is_omarchy(), touched_hypr);
         println!("integración revertida.");
     } else {
         println!("nada que revertir.");
@@ -360,7 +509,11 @@ mod tests {
 
     #[test]
     fn inserta_en_config_stock() {
-        let def = module_definition("$HOME/.local/bin/lazysubs-eye", 11);
+        let def = module_definition(
+            "$HOME/.local/bin/lazysubs-eye",
+            11,
+            Some("omarchy-launch-or-focus-tui lazysubs-eye"),
+        );
         let out = waybar_config_with_module(STOCK, &def).unwrap();
         assert!(out.contains("\"custom/ai-usage\", // lazysubs-eye"));
         assert!(out.contains("// lazysubs-eye-begin"));
@@ -384,7 +537,7 @@ mod tests {
     #[test]
     fn inserta_cuando_modules_right_es_el_ultimo_miembro() {
         let config = "{\n  \"modules-right\": [\n    \"battery\"\n  ]\n}";
-        let def = module_definition("lazysubs-eye", 11);
+        let def = module_definition("lazysubs-eye", 11, None);
         let out = waybar_config_with_module(config, &def).unwrap();
         let json: String = out
             .lines()
@@ -400,8 +553,8 @@ mod tests {
     #[test]
     fn inserta_en_array_vacio_sin_coma_colgante() {
         let config = "{\n  \"modules-right\": [],\n  \"clock\": {}\n}";
-        let out =
-            waybar_config_with_module(config, &module_definition("lazysubs-eye", 11)).unwrap();
+        let out = waybar_config_with_module(config, &module_definition("lazysubs-eye", 11, None))
+            .unwrap();
         assert!(out.contains("\"custom/ai-usage\" // lazysubs-eye"));
     }
 
@@ -412,7 +565,7 @@ mod tests {
 
     #[test]
     fn strip_revierte_la_insercion() {
-        let def = module_definition("lazysubs-eye", 11);
+        let def = module_definition("lazysubs-eye", 11, None);
         let out = waybar_config_with_module(STOCK, &def).unwrap();
         let (clean, changed) = strip_marked(&out);
         assert!(changed);
@@ -427,17 +580,108 @@ mod tests {
     }
 
     #[test]
-    fn strip_elimina_bloque_css() {
-        let style = format!("* {{ color: red; }}\n{}", style_block());
-        let (clean, changed) = strip_marked(&style);
-        assert!(changed);
-        assert!(!clean.contains("custom-ai-usage"));
-        assert!(clean.contains("* { color: red; }"));
+    fn strip_elimina_bloque_css_y_revierte_byte_a_byte() {
+        // install añade el bloque tras un CSS que termina en \n; uninstall debe
+        // devolverlo idéntico (sin líneas en blanco colgando).
+        for omarchy in [true, false] {
+            let original = "* { color: red; }\n";
+            let style = format!("{original}{}", style_block(omarchy));
+            let (clean, changed) = strip_marked(&style);
+            assert!(changed);
+            assert!(!clean.contains("custom-ai-usage"));
+            assert_eq!(
+                clean, original,
+                "round-trip byte a byte (omarchy={omarchy})"
+            );
+        }
     }
 
     #[test]
     fn brackets_anidados_y_strings_con_corchetes() {
         let s = r#"[ "a]b", ["c"], "d" ]x"#;
         assert_eq!(find_matching_bracket(s), Some(s.len() - 2));
+    }
+
+    #[test]
+    fn fallback_launch_prefiere_xdg_y_conoce_los_terminales() {
+        assert_eq!(
+            fallback_launch(true, Some("alacritty")).as_deref(),
+            Some("xdg-terminal-exec lazysubs-eye")
+        );
+        assert_eq!(
+            fallback_launch(false, Some("foot")).as_deref(),
+            Some("foot lazysubs-eye")
+        );
+        assert_eq!(
+            fallback_launch(false, Some("kitty")).as_deref(),
+            Some("kitty lazysubs-eye")
+        );
+        assert_eq!(
+            fallback_launch(false, Some("alacritty")).as_deref(),
+            Some("alacritty -e lazysubs-eye")
+        );
+        assert_eq!(
+            fallback_launch(false, Some("ghostty")).as_deref(),
+            Some("ghostty -e lazysubs-eye")
+        );
+        assert_eq!(fallback_launch(false, None), None);
+    }
+
+    #[test]
+    fn style_block_neutro_fuera_de_omarchy() {
+        let omarchy = style_block(true);
+        assert!(omarchy.contains("alpha(@foreground, 0.6)"));
+
+        let generic = style_block(false);
+        assert!(
+            !generic.contains("@foreground"),
+            "sin @foreground: {generic}"
+        );
+        assert!(generic.contains("#9a9a9a"));
+        // warning/critical llevan hex propios en ambos casos
+        assert!(generic.contains("#e5c07b") && generic.contains("#e06c75"));
+    }
+
+    #[test]
+    fn module_sin_on_click_sigue_siendo_json_valido() {
+        let def = module_definition("lazysubs-eye", 11, None);
+        assert!(!def.contains("on-click\""), "sin on-click de apertura");
+        assert!(def.contains("on-click-right"));
+        // envuelto como miembro de objeto y sin comentarios → JSON válido
+        let json: String = format!("{{{}}}", def.replace("// lazysubs-eye-begin", ""))
+            .lines()
+            .map(|l| match l.find("//") {
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        serde_json::from_str::<serde_json::Value>(&json).expect("JSON válido sin on-click");
+    }
+
+    #[test]
+    fn module_con_on_click_incluye_la_linea() {
+        let def = module_definition("lazysubs-eye", 11, Some("foot lazysubs-eye"));
+        assert!(def.contains("\"on-click\": \"foot lazysubs-eye\","));
+    }
+
+    #[test]
+    fn resolve_waybar_config_prefiere_jsonc_luego_config() {
+        let dir = std::env::temp_dir().join(format!("lazysubs-wb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // sin ficheros → default .jsonc
+        assert_eq!(resolve_waybar_config(&dir), dir.join("config.jsonc"));
+
+        // solo `config` (waybar estándar) → lo elige
+        std::fs::write(dir.join("config"), "{}").unwrap();
+        assert_eq!(resolve_waybar_config(&dir), dir.join("config"));
+
+        // si además existe .jsonc, gana el .jsonc
+        std::fs::write(dir.join("config.jsonc"), "{}").unwrap();
+        assert_eq!(resolve_waybar_config(&dir), dir.join("config.jsonc"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

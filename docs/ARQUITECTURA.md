@@ -86,11 +86,21 @@ y formato del usuario):
 Todo lo insertado va delimitado con marcadores `lazysubs-eye-begin`/`lazysubs-eye-end`
 (o `// lazysubs-eye` en líneas sueltas); `uninstall` elimina exactamente eso y
 restaura el fichero byte a byte (hay test de round-trip). Ambos comandos son
-idempotentes, hacen backup `.bak.<epoch>` antes de escribir y recargan con
-`omarchy restart waybar` + `hyprctl reload` (+ `configerrors`). Si el config
+idempotentes, hacen backup `.bak.<epoch>` antes de escribir. Si el config
 de waybar no tiene la estructura esperada, se imprime el snippet para
 instalación manual en vez de romper nada. Respeta `XDG_CONFIG_HOME` (útil
 para probar contra un directorio sandbox).
+
+**Genérico fuera de Omarchy (E3)**: `is_omarchy()` (existe `~/.local/share/omarchy`
+o `omarchy` en PATH) guía los fallbacks. El config de waybar se busca como
+`config.jsonc` o `config` a secas. La clase CSS `error` usa `alpha(@foreground,…)`
+en Omarchy (el tema define `@foreground`) o un hex neutro fuera. El `on-click`
+es `omarchy-launch-or-focus-tui` en Omarchy, o `xdg-terminal-exec`/el primer
+terminal conocido (foot/alacritty/kitty/ghostty) fuera (sin `on-click` si no hay
+ninguno). La windowrule flotante solo se añade si existe `hyprland.conf`. La
+recarga es `omarchy restart waybar` en Omarchy, o `pkill -SIGUSR2 waybar` con
+fallback a `systemctl --user try-restart waybar.service` fuera; `hyprctl reload`
+solo si se tocó Hyprland.
 
 ### Modos (main.rs)
 

@@ -117,6 +117,20 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
   credenciales falsas que degrada a error sin romper el output. **100 tests**.
   Cierra E2. Release v0.10.0. **Codex**: el email solo vive en el JWT (el
   guardarraíl no deja decodificarlo) → sin autodetección, alias de config.
+- **Fase E3 — cualquier Linux con waybar** ✓ (2026-07-15): `is_omarchy()`
+  (`~/.local/share/omarchy` o `omarchy` en PATH) guía los fallbacks en
+  `install.rs`: config de waybar `config.jsonc` **o** `config`; CSS con hex
+  neutro (`#9a9a9a`) fuera de Omarchy en vez de `alpha(@foreground,…)`; on-click
+  con `xdg-terminal-exec` o el primer terminal conocido
+  (foot/alacritty/kitty/ghostty), o sin on-click si no hay ninguno; windowrule
+  solo si existe `hyprland.conf` (otros compositores: mensaje + README); recarga
+  `pkill -SIGUSR2 waybar` con fallback `systemctl --user try-restart
+  waybar.service` (y `hyprctl reload` solo si se tocó Hyprland). Round-trip
+  install/uninstall **byte a byte** verificado en sandbox sin Omarchy (config
+  plano, sin hyprland, terminal falso). `style_block` sin salto inicial para que
+  el uninstall no deje líneas en blanco. README "Other Linux setups" + PKGBUILD
+  con optdepends ajustados. **105 tests**. Release v0.11.0. **Cierra el plan de
+  producto (fases E completas).**
 - **Post-lanzamiento (2026-07-14, feedback del usuario)** ✓: fix del texto
   truncado "sin uso hoy" en el panel OpenCode (era una celda de tabla con
   columna de 10 chars; ahora es párrafo), degradación con datos previos ante

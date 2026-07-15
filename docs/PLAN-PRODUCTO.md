@@ -182,6 +182,13 @@ multicuenta con un segundo fichero de credenciales falso que degrade a error
 
 ## Fase E3 — Cualquier Linux con waybar (Omarchy primero)
 
+> **✓ Implementada el 2026-07-15 (v0.11.0).** `is_omarchy()` guía los fallbacks;
+> config de waybar `config.jsonc` o `config`; CSS neutro (hex) fuera de Omarchy;
+> on-click con `xdg-terminal-exec`/terminal conocido; windowrule solo si hay
+> `hyprland.conf`; recarga con `pkill -SIGUSR2 waybar` + `systemctl --user
+> try-restart`. Round-trip install/uninstall byte a byte verificado en sandbox
+> sin Omarchy. README con "Other Linux setups".
+
 ### Objetivo
 
 Que `lazysubs-eye install` y el runtime funcionen en cualquier distro con
