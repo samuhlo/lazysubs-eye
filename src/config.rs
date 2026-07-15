@@ -369,6 +369,7 @@ fn apply_to_doc(doc: &mut DocumentMut, config: &Config) {
     if let Some(percent) = config.waybar.percent {
         ensure_table(doc, "waybar")["percent"] = value(percent);
     }
+    set_window_map(doc, &config.waybar.window);
     set_list(doc, "tui", "providers", &config.tui.providers);
     set_list(doc, "tui", "panels", &config.tui.panels);
 
@@ -381,6 +382,36 @@ fn apply_to_doc(doc: &mut DocumentMut, config: &Config) {
         table["default_period"] = value(stats.default_period.as_str());
         table["history_days"] = value(stats.history_days);
         table["sparkline"] = value(stats.sparkline);
+    }
+}
+
+/// Persiste `[waybar.window]` (id → etiqueta) como subtabla explícita, o la
+/// elimina si no hay selección.
+fn set_window_map(doc: &mut DocumentMut, map: &Option<std::collections::BTreeMap<String, String>>) {
+    match map {
+        Some(map) if !map.is_empty() => {
+            let waybar = ensure_table(doc, "waybar");
+            if !waybar.contains_key("window") || waybar["window"].as_table().is_none() {
+                waybar["window"] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            let window = waybar["window"].as_table_mut().expect("recién insertada");
+            let stale: Vec<String> = window
+                .iter()
+                .map(|(k, _)| k.to_string())
+                .filter(|k| !map.contains_key(k))
+                .collect();
+            for key in stale {
+                window.remove(&key);
+            }
+            for (id, label) in map {
+                window[id] = value(label.as_str());
+            }
+        }
+        _ => {
+            if let Some(waybar) = doc.get_mut("waybar").and_then(|i| i.as_table_mut()) {
+                waybar.remove("window");
+            }
+        }
     }
 }
 
@@ -597,6 +628,42 @@ api_key = "sk-x"
         assert!(
             toml::from_str::<Config>("[[accounts.claude]]\nname = \"x\"\nbogus = 1\n").is_err()
         );
+    }
+
+    #[test]
+    fn apply_to_doc_persiste_waybar_window() {
+        let mut doc: DocumentMut = "# cfg\n".parse().unwrap();
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("claude".to_string(), "semana".to_string());
+        let config = Config {
+            waybar: Waybar {
+                window: Some(map),
+                ..Waybar::default()
+            },
+            ..Config::default()
+        };
+        apply_to_doc(&mut doc, &config);
+        let out = doc.to_string();
+        assert!(out.contains("[waybar.window]"), "subtabla explícita: {out}");
+        assert!(out.contains("claude = \"semana\""));
+        let reloaded: Config = toml::from_str(&out).unwrap();
+        assert_eq!(
+            reloaded
+                .waybar
+                .window
+                .as_ref()
+                .and_then(|m| m.get("claude"))
+                .map(String::as_str),
+            Some("semana")
+        );
+
+        // volver a "auto" (mapa vacío) elimina la subtabla
+        let cleared = Config {
+            waybar: Waybar::default(),
+            ..Config::default()
+        };
+        apply_to_doc(&mut doc, &cleared);
+        assert!(!doc.to_string().contains("[waybar.window]"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 # Maintainer: Samuel López (samuhlo) <samuhlodev@gmail.com>
 pkgname=lazysubs-eye-bin
-pkgver=0.12.0
+pkgver=0.13.0
 pkgrel=1
 pkgdesc="AI subscription quota monitor for Omarchy (waybar + TUI)"
 arch=('x86_64')

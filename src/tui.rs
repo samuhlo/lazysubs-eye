@@ -86,6 +86,7 @@ enum Setting {
     Provider(usize),
     WaybarPercent,
     WaybarProvider(usize),
+    WaybarWindow(usize),
     TuiProvider(usize),
     TuiPanel(usize),
     StatsEnabled,
@@ -133,6 +134,8 @@ fn settings_items() -> Vec<Setting> {
     items.push(Setting::Section("waybar"));
     items.push(Setting::WaybarPercent);
     items.extend((0..surface).map(Setting::WaybarProvider));
+    items.push(Setting::Section("ventana en la barra"));
+    items.extend((0..surface).map(Setting::WaybarWindow));
     items.push(Setting::Section("tui"));
     items.extend((0..surface).map(Setting::TuiProvider));
     items.extend((0..PANELS.len()).map(Setting::TuiPanel));
@@ -218,6 +221,16 @@ impl App {
         }
     }
 
+    /// Etiquetas de las ventanas de un provider (de la última consulta), para
+    /// el selector "ventana en la barra" del panel de opciones.
+    fn provider_window_labels(&self, id: &str) -> Vec<String> {
+        self.status
+            .as_ref()
+            .and_then(|s| s.providers.iter().find(|p| p.id == id))
+            .map(|p| p.windows.iter().map(|w| w.label.clone()).collect())
+            .unwrap_or_default()
+    }
+
     fn settings_move(&mut self, delta: i64) {
         let items = settings_items();
         let Some(mut cursor) = self.settings_cursor else {
@@ -269,6 +282,36 @@ impl App {
                 let surface = surface_providers();
                 let all: Vec<&str> = surface.iter().map(|(id, _)| id.as_str()).collect();
                 crate::config::toggle_id(&mut config.waybar.providers, &all, &surface[i].0)
+            }
+            Setting::WaybarWindow(i) => {
+                let surface = surface_providers();
+                let Some((id, _)) = surface.get(i).cloned() else {
+                    return;
+                };
+                // Opciones: "auto" (worst) + una por ventana del provider.
+                let mut options: Vec<Option<String>> = vec![None];
+                options.extend(self.provider_window_labels(&id).into_iter().map(Some));
+                let current = config
+                    .waybar
+                    .window
+                    .as_ref()
+                    .and_then(|m| m.get(&id))
+                    .cloned();
+                let cur = options.iter().position(|o| o == &current).unwrap_or(0);
+                let step = if dir == 0 { 1 } else { dir };
+                let next = (cur as i64 + step).rem_euclid(options.len() as i64) as usize;
+                let map = config.waybar.window.get_or_insert_with(Default::default);
+                match &options[next] {
+                    Some(label) => {
+                        map.insert(id.clone(), label.clone());
+                    }
+                    None => {
+                        map.remove(&id);
+                    }
+                }
+                if map.is_empty() {
+                    config.waybar.window = None;
+                }
             }
             Setting::TuiProvider(i) => {
                 let surface = surface_providers();
@@ -563,7 +606,8 @@ impl App {
     }
 
     fn draw_graph(&self, f: &mut Frame, area: Rect) {
-        let title = format!(" ✳  gasto · {} ", self.graph_view.label());
+        // Suma de las tres fuentes (Claude + Pi + OpenCode): no es solo Claude.
+        let title = format!(" tokens totales · {} ", self.graph_view.label());
         let block = bordered(title).padding(Padding::horizontal(1));
         let inner = block.inner(area);
         f.render_widget(block, area);
@@ -1118,6 +1162,22 @@ fn setting_row(item: &Setting, config: &crate::config::Config) -> (String, Strin
             let surface = surface_providers();
             match surface.get(*i) {
                 Some((id, name)) => (name.clone(), check(in_list(&config.waybar.providers, id))),
+                None => (String::new(), String::new()),
+            }
+        }
+        Setting::WaybarWindow(i) => {
+            let surface = surface_providers();
+            match surface.get(*i) {
+                Some((id, name)) => {
+                    let sel = config
+                        .waybar
+                        .window
+                        .as_ref()
+                        .and_then(|m| m.get(id))
+                        .cloned()
+                        .unwrap_or_else(|| "auto".into());
+                    (name.clone(), format!("◂{:^14}▸", truncate_account(&sel)))
+                }
                 None => (String::new(), String::new()),
             }
         }

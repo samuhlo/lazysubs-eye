@@ -172,6 +172,11 @@ con sus cuentas reales (Claude pro, Codex plus). El objetivo actual es
   con 3 vistas (semana/mes/horas, tecla `v`) — sustituye al sparkline como la
   visualización buena; añade escáneres horarios de hoy. **111 tests**. Release
   v0.12.0.
+- **Ajustes v0.13.0 (2026-07-15, feedback)** ✓: (1) selección de ventana de la
+  barra desde el panel `o` (sección "ventana en la barra", cicla auto→ventanas
+  del provider con ←/→; persiste `[waybar.window]` vía `set_window_map` en
+  toml_edit); (2) la gráfica se titula "tokens totales · <vista>" (sin el ✳ de
+  Claude) porque **suma las tres fuentes**. **112 tests**.
 
 ## Decisiones de diseño ya tomadas (respetar)
 

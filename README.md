@@ -116,6 +116,7 @@ minimax = true
 # [waybar.window]    # which window each provider shows (by label); default is
 # claude = "semana"  # the most urgent one. Exact match, else substring —
 # codex = "semana"   # e.g. "Fable" -> "semana · Fable". Drives text and color.
+                     # Also selectable live in the `o` panel (no file editing).
 
 [tui]                # what the TUI shows
 # providers = ["minimax", "claude", "codex"]
