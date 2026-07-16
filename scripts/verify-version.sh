@@ -2,7 +2,9 @@
 set -euo pipefail
 
 version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
-tag=${GITHUB_REF_NAME:-${1:-}}
+# Un argumento explícito es el contrato de CI; el ref del entorno solo se usa
+# en el workflow de tag, donde no se pasa argumento.
+tag=${1:-${GITHUB_REF_NAME:-}}
 tag=${tag#v}
 
 if [[ -z "$version" ]]; then
