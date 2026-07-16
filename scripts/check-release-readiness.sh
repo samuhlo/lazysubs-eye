@@ -11,8 +11,8 @@ grep -Fq 'scripts/verify-version.sh' .github/workflows/release.yml
 grep -Fq 'scripts/smoke-release.sh' .github/workflows/release.yml
 grep -Fq 'cargo build --release --locked --target x86_64-unknown-linux-musl' .github/workflows/release.yml
 grep -Fq 'sha256sum' .github/workflows/release.yml
-grep -Fq '## Compatibilidad' README.md
-grep -Fq '## Privacidad y seguridad local' README.md
+grep -Fq '## // 11\_ COMPATIBILITY' README.md
+grep -Fq '## // 09\_ SECURITY_MODEL' README.md
 test -s SECURITY.md
 test -s CONTRIBUTING.md
 test -s CHANGELOG.md
