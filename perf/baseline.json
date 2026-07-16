@@ -1,0 +1,18 @@
+{
+  "environment": "x86_64 Linux, debug fixtures, 2026-07-16",
+  "variance_percent": 10,
+  "metrics_ms": {
+    "waybar_cached": 2,
+    "first_render": 35,
+    "incremental_pi_100_sessions": 12,
+    "refresh_global_ceiling": 8000,
+    "backfill_day_ceiling": 500
+  },
+  "budgets_ms": {
+    "waybar_cached": 10,
+    "first_render": 150,
+    "incremental_pi_100_sessions": 500,
+    "refresh_global": 8000,
+    "backfill_day": 500
+  }
+}

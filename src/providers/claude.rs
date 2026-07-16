@@ -142,7 +142,13 @@ pub fn collect(creds_path: &Path) -> Result<ProviderStatus> {
         bail!("token caducado — abre Claude Code para refrescarlo");
     }
 
-    let resp = ureq::get(USAGE_URL)
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(3))
+        .timeout_read(std::time::Duration::from_secs(5))
+        .timeout_write(std::time::Duration::from_secs(3))
+        .build();
+    let resp = agent
+        .get(USAGE_URL)
         .set(
             "Authorization",
             &format!("Bearer {}", creds.oauth.access_token),

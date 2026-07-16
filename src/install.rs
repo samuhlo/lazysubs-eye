@@ -7,16 +7,146 @@
 //! Antes de tocar un fichero se guarda un backup `<fichero>.bak.<epoch>`.
 
 use anyhow::{bail, Context, Result};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const MODULE_KEY: &str = "custom/ai-usage";
 const WINDOWRULE: &str = "windowrule = tag +floating-window, match:class org.omarchy.lazysubs-eye";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InstallError {
+    BinaryNotFound,
+    WaybarConfigNotFound,
+    WaybarStyleNotFound,
+    ConfigNotWritable,
+    OwnershipConflict,
+    RollbackFailed(Vec<String>),
+    MarkerMismatch,
+}
+
+impl std::fmt::Display for InstallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BinaryNotFound => write!(f, "no se pudo resolver el binario en ejecución"),
+            Self::WaybarConfigNotFound => write!(f, "no existe la configuración de waybar"),
+            Self::WaybarStyleNotFound => write!(f, "no existe style.css de waybar"),
+            Self::ConfigNotWritable => write!(f, "la configuración de waybar no es escribible"),
+            Self::OwnershipConflict => write!(f, "hay reglas manuales dentro de los marcadores"),
+            Self::RollbackFailed(files) => write!(f, "rollback incompleto: {}", files.join(", ")),
+            Self::MarkerMismatch => write!(f, "los marcadores están incompletos o editados"),
+        }
+    }
+}
+
+impl std::error::Error for InstallError {}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct InstallPlan {
+    pub files_to_modify: Vec<String>,
+    pub backups_to_create: Vec<String>,
+    pub commands_to_run: Vec<String>,
+    pub files_to_delete: Vec<String>,
+}
+
 struct ConfigPaths {
     waybar_config: PathBuf,
     waybar_style: PathBuf,
     hyprland_conf: PathBuf,
+}
+
+/// Backups creados durante una operación. El rollback se aplica en orden
+/// inverso, porque una modificación posterior puede depender de una anterior.
+#[derive(Default)]
+struct BackupManager {
+    entries: Vec<(PathBuf, PathBuf)>,
+}
+
+impl BackupManager {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn backup(&mut self, path: &Path) -> Result<PathBuf> {
+        let copy = backup(path)?;
+        self.entries.push((path.to_owned(), copy.clone()));
+        Ok(copy)
+    }
+
+    #[allow(dead_code)] // Se conecta al ejecutor transaccional al agrupar el plan completo.
+    fn rollback(&mut self) -> std::result::Result<(), InstallError> {
+        let mut failed = Vec::new();
+        for (destination, copy) in self.entries.iter().rev() {
+            if std::fs::copy(copy, destination).is_err() {
+                failed.push(crate::diagnostics::sanitize_error(
+                    destination.display().to_string(),
+                ));
+            }
+        }
+        if failed.is_empty() {
+            Ok(())
+        } else {
+            Err(InstallError::RollbackFailed(failed))
+        }
+    }
+}
+
+/// Checks sin efectos antes de instalar: evita crear backups o editar a
+/// medias cuando falta alguno de los dos ficheros base de Waybar.
+fn preflight_install(paths: &ConfigPaths) -> Vec<InstallError> {
+    let mut issues = Vec::new();
+    if !paths.waybar_config.is_file() {
+        issues.push(InstallError::WaybarConfigNotFound);
+    }
+    if !paths.waybar_style.is_file() {
+        issues.push(InstallError::WaybarStyleNotFound);
+    }
+    for path in [&paths.waybar_config, &paths.waybar_style] {
+        if path.exists() && std::fs::OpenOptions::new().write(true).open(path).is_err() {
+            issues.push(InstallError::ConfigNotWritable);
+            break;
+        }
+    }
+    issues
+}
+
+fn preflight_uninstall(paths: &ConfigPaths) -> Vec<InstallError> {
+    let mut issues = Vec::new();
+    for path in [
+        &paths.waybar_config,
+        &paths.waybar_style,
+        &paths.hyprland_conf,
+    ] {
+        if !path.exists() {
+            continue;
+        }
+        if std::fs::OpenOptions::new().write(true).open(path).is_err() {
+            issues.push(InstallError::ConfigNotWritable);
+            continue;
+        }
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if text.contains("lazysubs-eye-begin") || text.contains("lazysubs-eye-end") {
+                if let Err(issue) = validate_markers(path) {
+                    issues.push(issue);
+                }
+            }
+        }
+    }
+    issues
+}
+
+fn require_preflight(paths: &ConfigPaths) -> Result<()> {
+    let issues = preflight_install(paths);
+    if issues.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "preflight falló: {}",
+        issues
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
 }
 
 /// Omarchy detectado: existe `~/.local/share/omarchy` o hay `omarchy` en PATH.
@@ -59,65 +189,86 @@ fn config_paths() -> Result<ConfigPaths> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .context("ni XDG_CONFIG_HOME ni HOME están definidos")?;
+    Ok(config_paths_at(&config_home))
+}
+
+fn config_paths_at(config_home: &Path) -> ConfigPaths {
     let waybar_dir = config_home.join("waybar");
-    Ok(ConfigPaths {
+    ConfigPaths {
         waybar_config: resolve_waybar_config(&waybar_dir),
         waybar_style: waybar_dir.join("style.css"),
         hyprland_conf: config_home.join("hypr/hyprland.conf"),
-    })
+    }
 }
 
 /// Ruta del binario para el `exec` del módulo. Si cae bajo $HOME se escribe
 /// con `$HOME` literal (waybar lo expande vía shell) para que el config sea
 /// portable entre máquinas.
-fn exec_path() -> String {
-    let exe = std::env::current_exe()
+pub fn resolve_binary_path() -> std::result::Result<PathBuf, InstallError> {
+    let path = std::env::current_exe()
         .ok()
-        .and_then(|p| p.canonicalize().ok());
+        .and_then(|path| path.canonicalize().ok())
+        .or_else(|| std::fs::read_link("/proc/self/exe").ok())
+        .filter(|path| path.is_file())
+        .ok_or(InstallError::BinaryNotFound)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if std::fs::metadata(&path)
+            .map(|metadata| metadata.permissions().mode() & 0o111 == 0)
+            .unwrap_or(true)
+        {
+            return Err(InstallError::BinaryNotFound);
+        }
+    }
+    Ok(path)
+}
+
+fn exec_path() -> std::result::Result<String, InstallError> {
+    let exe = resolve_binary_path()?;
     let home = std::env::var("HOME").ok();
-    match (exe, home) {
-        (Some(exe), Some(home)) => {
+    Ok(match (exe, home) {
+        (exe, Some(home)) => {
             let exe = exe.to_string_lossy().into_owned();
             match exe.strip_prefix(&home) {
                 Some(rest) => format!("$HOME{rest}"),
                 None => exe,
             }
         }
-        (Some(exe), None) => exe.to_string_lossy().into_owned(),
-        (None, _) => "lazysubs-eye".to_string(),
-    }
+        (exe, None) => exe.to_string_lossy().into_owned(),
+    })
 }
 
 /// Comando terminal para lanzar la TUI fuera de Omarchy. Preferimos el
 /// estándar freedesktop `xdg-terminal-exec`; si no, el primer terminal conocido
 /// con su invocación correcta. `None` = ningún terminal detectado.
-fn fallback_launch(has_xdg_term: bool, terminal: Option<&str>) -> Option<String> {
+fn fallback_launch_for(exec: &str, has_xdg_term: bool, terminal: Option<&str>) -> Option<String> {
     if has_xdg_term {
-        return Some("xdg-terminal-exec lazysubs-eye".into());
+        return Some(format!("xdg-terminal-exec {exec}"));
     }
     // foot y kitty aceptan el comando directo; alacritty y ghostty usan -e.
     match terminal? {
-        "foot" => Some("foot lazysubs-eye".into()),
-        "kitty" => Some("kitty lazysubs-eye".into()),
-        term => Some(format!("{term} -e lazysubs-eye")),
+        "foot" => Some(format!("foot {exec}")),
+        "kitty" => Some(format!("kitty {exec}")),
+        term => Some(format!("{term} -e {exec}")),
     }
 }
 
-fn detect_launch() -> Option<String> {
+fn detect_launch(exec: &str) -> Option<String> {
     let has_xdg = which("xdg-terminal-exec").is_some();
     let terminal = ["foot", "alacritty", "kitty", "ghostty"]
         .into_iter()
         .find(|t| which(t).is_some());
-    fallback_launch(has_xdg, terminal)
+    fallback_launch_for(exec, has_xdg, terminal)
 }
 
 /// Comando `on-click` de la TUI: launch-or-focus en Omarchy, terminal genérico
 /// fuera. `None` si no hay forma de abrir (se instala sin on-click).
-fn on_click(omarchy: bool) -> Option<String> {
+fn on_click(omarchy: bool, exec: &str) -> Option<String> {
     if omarchy {
-        Some("omarchy-launch-or-focus-tui lazysubs-eye".into())
+        Some(format!("omarchy-launch-or-focus-tui {exec}"))
     } else {
-        detect_launch()
+        detect_launch(exec)
     }
 }
 
@@ -256,27 +407,142 @@ fn strip_marked(text: &str) -> (String, bool) {
     (out, changed)
 }
 
+fn markers_are_balanced(text: &str) -> bool {
+    let begins = text.matches("lazysubs-eye-begin").count();
+    let ends = text.matches("lazysubs-eye-end").count();
+    begins == ends
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkerValidation {
+    Absent,
+    Intact,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineConflict {
+    pub line: usize,
+    pub content: String,
+}
+
+pub fn check_manual_rules_between_markers(path: &Path) -> Vec<LineConflict> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let allowed_json = [
+        MODULE_KEY,
+        "\"exec\"",
+        "\"return-type\"",
+        "\"interval\"",
+        "\"signal\"",
+        "\"on-click\"",
+        "\"on-click-right\"",
+    ];
+    let mut inside = false;
+    let mut conflicts = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if line.contains("lazysubs-eye-begin") {
+            inside = true;
+            continue;
+        }
+        if line.contains("lazysubs-eye-end") {
+            inside = false;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        let trimmed = line.trim();
+        let structural = trimmed.is_empty()
+            || matches!(trimmed, "{" | "}" | "},")
+            || trimmed.starts_with("#custom-ai-usage")
+            || trimmed.starts_with("/*")
+            || trimmed.starts_with("margin:")
+            || trimmed.starts_with("color:")
+            || allowed_json.iter().any(|known| trimmed.contains(known));
+        if !structural {
+            conflicts.push(LineConflict {
+                line: index + 1,
+                content: crate::diagnostics::sanitize_error(trimmed),
+            });
+        }
+    }
+    conflicts
+}
+
+pub fn validate_markers(path: &Path) -> std::result::Result<MarkerValidation, InstallError> {
+    let text = std::fs::read_to_string(path).map_err(|_| InstallError::ConfigNotWritable)?;
+    if !text.contains("lazysubs-eye-begin") && !text.contains("lazysubs-eye-end") {
+        return Ok(MarkerValidation::Absent);
+    }
+    if !markers_are_balanced(&text) {
+        return Err(InstallError::MarkerMismatch);
+    }
+    if !check_manual_rules_between_markers(path).is_empty() {
+        return Err(InstallError::OwnershipConflict);
+    }
+    Ok(MarkerValidation::Intact)
+}
+
+fn build_install_plan(paths: &ConfigPaths, omarchy: bool) -> Result<InstallPlan> {
+    let mut plan = InstallPlan::default();
+    let config = std::fs::read_to_string(&paths.waybar_config)?;
+    let style = std::fs::read_to_string(&paths.waybar_style)?;
+    for (path, changes) in [
+        (&paths.waybar_config, !config.contains(MODULE_KEY)),
+        (&paths.waybar_style, !style.contains("#custom-ai-usage")),
+    ] {
+        if changes {
+            plan.files_to_modify.push(path.display().to_string());
+            plan.backups_to_create.push(path.display().to_string());
+        }
+    }
+    if paths.hyprland_conf.exists() {
+        let hypr = std::fs::read_to_string(&paths.hyprland_conf)?;
+        if !hypr.contains("org.omarchy.lazysubs-eye") {
+            plan.files_to_modify
+                .push(paths.hyprland_conf.display().to_string());
+            plan.backups_to_create
+                .push(paths.hyprland_conf.display().to_string());
+        }
+    }
+    if !plan.files_to_modify.is_empty() {
+        plan.commands_to_run.push(if omarchy {
+            "omarchy restart waybar".into()
+        } else {
+            "reload waybar".into()
+        });
+    }
+    Ok(plan)
+}
+
 fn backup(path: &Path) -> Result<PathBuf> {
     let epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let bak = path.with_extension(format!(
+    let base = path.with_extension(format!(
         "{}bak.{epoch}",
         path.extension()
             .map(|e| format!("{}.", e.to_string_lossy()))
             .unwrap_or_default()
     ));
+    let mut bak = base.clone();
+    let mut suffix = 1_u64;
+    while bak.exists() {
+        bak = PathBuf::from(format!("{}.{}", base.display(), suffix));
+        suffix += 1;
+    }
     std::fs::copy(path, &bak).with_context(|| format!("no pude crear el backup de {path:?}"))?;
     Ok(bak)
 }
 
-fn write_with_backup(path: &Path, contents: &str) -> Result<()> {
-    let bak = backup(path)?;
+fn write_with_backup(backups: &mut BackupManager, path: &Path, contents: &str) -> Result<()> {
+    let bak = backups.backup(path)?;
     // Escritura atómica: waybar vigila estos ficheros (reload_style_on_change)
     // y el propio install reinicia servicios justo después; un write no
     // atómico puede dejar que lean el fichero a medias.
-    crate::cache::atomic_save(path, contents.as_bytes())
+    crate::cache::atomic_save_system(path, contents.as_bytes())
         .with_context(|| format!("no pude escribir {path:?}"))?;
     println!("  ✓ {} (backup: {})", path.display(), bak.display());
     Ok(())
@@ -338,11 +604,34 @@ fn reload_hyprland() {
 }
 
 pub fn install(signal: u8) -> Result<()> {
+    let mut backups = BackupManager::new();
+    match install_inner(signal, &mut backups) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if let Err(rollback) = backups.rollback() {
+                return Err(error.context(rollback.to_string()));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn install_inner(signal: u8, backups: &mut BackupManager) -> Result<()> {
+    let paths = config_paths()?;
+    install_with_paths(signal, &paths, backups, true)
+}
+
+fn install_with_paths(
+    signal: u8,
+    paths: &ConfigPaths,
+    backups: &mut BackupManager,
+    reload_services: bool,
+) -> Result<()> {
     if !(1..=30).contains(&signal) {
         bail!("--signal debe estar entre 1 y 30 (RTMIN+N)");
     }
-    let paths = config_paths()?;
-    let exec = exec_path();
+    require_preflight(paths)?;
+    let exec = exec_path()?;
     let omarchy = is_omarchy();
     let mut changed = false;
     if !omarchy {
@@ -352,7 +641,7 @@ pub fn install(signal: u8) -> Result<()> {
     // waybar config (config.jsonc en Omarchy, o `config` a secas)
     let config = std::fs::read_to_string(&paths.waybar_config)
         .with_context(|| format!("no pude leer {:?}", paths.waybar_config))?;
-    let click = on_click(omarchy);
+    let click = on_click(omarchy, &exec);
     if click.is_none() {
         println!(
             "  ⚠ sin terminal detectado para abrir la TUI; instalo el módulo sin on-click \
@@ -370,7 +659,7 @@ pub fn install(signal: u8) -> Result<()> {
             &module_definition(&exec, signal, click.as_deref()),
         ) {
             Some(updated) => {
-                write_with_backup(&paths.waybar_config, &updated)?;
+                write_with_backup(backups, &paths.waybar_config, &updated)?;
                 changed = true;
             }
             None => {
@@ -399,6 +688,7 @@ pub fn install(signal: u8) -> Result<()> {
             "\n"
         };
         write_with_backup(
+            backups,
             &paths.waybar_style,
             &format!("{style}{sep}{}", style_block(omarchy)),
         )?;
@@ -419,6 +709,7 @@ pub fn install(signal: u8) -> Result<()> {
         } else {
             let sep = if hypr.ends_with('\n') { "" } else { "\n" };
             write_with_backup(
+                backups,
                 &paths.hyprland_conf,
                 &format!("{hypr}{sep}\n{WINDOWRULE} # lazysubs-eye\n"),
             )?;
@@ -433,7 +724,9 @@ pub fn install(signal: u8) -> Result<()> {
     }
 
     if changed {
-        reload(omarchy, touched_hypr);
+        if reload_services {
+            reload(omarchy, touched_hypr);
+        }
         println!("listo. El módulo aparece en waybar; click izquierdo abre la TUI.");
     } else {
         println!("nada que hacer: la integración ya estaba completa.");
@@ -441,17 +734,79 @@ pub fn install(signal: u8) -> Result<()> {
     Ok(())
 }
 
-pub fn uninstall() -> Result<()> {
+/// Ejecuta install contra un árbol XDG aislado. Nunca recarga procesos del
+/// host; con `dry_run` sólo devuelve el plan serializable.
+pub fn install_sandbox(config_home: &Path, signal: u8, dry_run: bool) -> Result<InstallPlan> {
+    let paths = config_paths_at(config_home);
+    require_preflight(&paths)?;
+    let plan = build_install_plan(&paths, false)?;
+    if dry_run {
+        return Ok(plan);
+    }
+    let mut backups = BackupManager::new();
+    if let Err(error) = install_with_paths(signal, &paths, &mut backups, false) {
+        if let Err(rollback) = backups.rollback() {
+            return Err(error.context(rollback.to_string()));
+        }
+        return Err(error);
+    }
+    Ok(plan)
+}
+
+/// Muestra el plan de instalación sin crear backups, editar archivos ni
+/// recargar procesos. Comparte las comprobaciones de lectura con `install`.
+pub fn install_dry_run(signal: u8) -> Result<()> {
+    if !(1..=30).contains(&signal) {
+        bail!("--signal debe estar entre 1 y 30 (RTMIN+N)");
+    }
     let paths = config_paths()?;
+    require_preflight(&paths)?;
+    let omarchy = is_omarchy();
+    let plan = build_install_plan(&paths, omarchy)?;
+    println!("dry-run: no se modificará ningún archivo ni se recargará ningún servicio.");
+    println!("{}", serde_json::to_string_pretty(&plan)?);
+    println!("  · modo: {}", if omarchy { "Omarchy" } else { "genérico" });
+    Ok(())
+}
+
+pub fn uninstall() -> Result<()> {
+    let mut backups = BackupManager::new();
+    match uninstall_inner(&mut backups) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            if let Err(rollback) = backups.rollback() {
+                return Err(error.context(rollback.to_string()));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn uninstall_inner(backups: &mut BackupManager) -> Result<()> {
+    let paths = config_paths()?;
+    let issues = preflight_uninstall(&paths);
+    if !issues.is_empty() {
+        bail!(
+            "preflight de uninstall falló: {}",
+            issues
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ")
+        );
+    }
     let mut changed = false;
 
     for path in [&paths.waybar_config, &paths.waybar_style] {
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
+        if text.contains("lazysubs-eye-begin") || text.contains("lazysubs-eye-end") {
+            validate_markers(path).map_err(anyhow::Error::new)?;
+        }
         let (clean, modified) = strip_marked(&text);
         if modified {
-            write_with_backup(path, &clean)?;
+            write_with_backup(backups, path, &clean)?;
             changed = true;
         }
         let leftover = if path == &paths.waybar_config {
@@ -475,7 +830,7 @@ pub fn uninstall() -> Result<()> {
             .filter(|l| !l.contains("org.omarchy.lazysubs-eye"))
             .collect();
         if kept.len() != text.len() {
-            write_with_backup(&paths.hyprland_conf, &kept)?;
+            write_with_backup(backups, &paths.hyprland_conf, &kept)?;
             changed = true;
             touched_hypr = true;
         }
@@ -532,6 +887,150 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         serde_json::from_str::<serde_json::Value>(&json).expect("JSON inválido tras insertar");
+    }
+
+    #[test]
+    fn preflight_detecta_los_dos_archivos_base_ausentes() {
+        let root =
+            std::env::temp_dir().join(format!("lazysubs-eye-preflight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let paths = ConfigPaths {
+            waybar_config: root.join("config.jsonc"),
+            waybar_style: root.join("style.css"),
+            hyprland_conf: root.join("hyprland.conf"),
+        };
+        let issues = preflight_install(&paths);
+        assert!(issues.contains(&InstallError::WaybarConfigNotFound));
+        assert!(issues.contains(&InstallError::WaybarStyleNotFound));
+    }
+
+    #[test]
+    fn install_plan_serializa_todas_las_fases() {
+        let plan = InstallPlan {
+            files_to_modify: vec!["config".into()],
+            backups_to_create: vec!["config".into()],
+            commands_to_run: vec!["reload waybar".into()],
+            files_to_delete: vec![],
+        };
+        let value = serde_json::to_value(plan).unwrap();
+        assert_eq!(value["files_to_modify"][0], "config");
+        assert!(value.get("backups_to_create").is_some());
+        assert!(value.get("commands_to_run").is_some());
+        assert!(value.get("files_to_delete").is_some());
+    }
+
+    #[test]
+    fn resolve_binary_devuelve_un_ejecutable_canonico() {
+        let binary = resolve_binary_path().unwrap();
+        assert!(binary.is_absolute());
+        assert!(binary.is_file());
+    }
+
+    #[test]
+    fn marker_validation_detecta_edicion_manual() {
+        let root = std::env::temp_dir().join(format!("lazysubs-markers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("config");
+        std::fs::write(
+            &file,
+            "// lazysubs-eye-begin\n  \"exec\": \"lazysubs-eye\"\n// lazysubs-eye-end\n",
+        )
+        .unwrap();
+        assert_eq!(validate_markers(&file), Ok(MarkerValidation::Intact));
+        std::fs::write(
+            &file,
+            "// lazysubs-eye-begin\n  \"manual-rule\": true\n// lazysubs-eye-end\n",
+        )
+        .unwrap();
+        assert_eq!(
+            validate_markers(&file),
+            Err(InstallError::OwnershipConflict)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn sandbox_dry_run_no_escribe_y_execute_es_idempotente() {
+        let root = std::env::temp_dir().join(format!("lazysubs-sandbox-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("waybar")).unwrap();
+        std::fs::write(root.join("waybar/config.jsonc"), STOCK).unwrap();
+        std::fs::write(root.join("waybar/style.css"), "/* user */\n").unwrap();
+        let before = std::fs::read(root.join("waybar/config.jsonc")).unwrap();
+        let plan = install_sandbox(&root, 11, true).unwrap();
+        assert_eq!(
+            std::fs::read(root.join("waybar/config.jsonc")).unwrap(),
+            before
+        );
+        assert_eq!(plan.files_to_modify.len(), 2);
+
+        install_sandbox(&root, 11, false).unwrap();
+        let once = std::fs::read(root.join("waybar/config.jsonc")).unwrap();
+        install_sandbox(&root, 11, false).unwrap();
+        let twice = std::fs::read(root.join("waybar/config.jsonc")).unwrap();
+        assert_eq!(once, twice);
+        assert!(String::from_utf8(once).unwrap().contains(MODULE_KEY));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn markers_incompletos_no_se_consideran_propiedad_segura() {
+        assert!(markers_are_balanced(
+            "/* lazysubs-eye-begin */\n/* lazysubs-eye-end */"
+        ));
+        assert!(!markers_are_balanced("/* lazysubs-eye-begin */"));
+        assert!(!markers_are_balanced("/* lazysubs-eye-end */"));
+    }
+
+    #[test]
+    fn backups_no_se_sobrescriben_en_el_mismo_segundo() {
+        let root = std::env::temp_dir().join(format!("lazysubs-eye-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("config");
+        std::fs::write(&file, "first").unwrap();
+        let first = backup(&file).unwrap();
+        std::fs::write(&file, "second").unwrap();
+        let second = backup(&file).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(std::fs::read_to_string(first).unwrap(), "first");
+        assert_eq!(std::fs::read_to_string(second).unwrap(), "second");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn backup_manager_restaura_en_rollback() {
+        let root =
+            std::env::temp_dir().join(format!("lazysubs-eye-rollback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("config");
+        std::fs::write(&file, "before").unwrap();
+        let mut manager = BackupManager::default();
+        manager.backup(&file).unwrap();
+        std::fs::write(&file, "after").unwrap();
+        manager.rollback().unwrap();
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "before");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rollback_failure_enumera_destinos_afectados() {
+        let root =
+            std::env::temp_dir().join(format!("lazysubs-rollback-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut manager = BackupManager::new();
+        manager
+            .entries
+            .push((root.join("destination"), root.join("missing-backup")));
+        assert!(matches!(
+            manager.rollback(),
+            Err(InstallError::RollbackFailed(files)) if files.len() == 1
+        ));
+        assert!(manager.backup(&root.join("absent")).is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
@@ -605,26 +1104,26 @@ mod tests {
     #[test]
     fn fallback_launch_prefiere_xdg_y_conoce_los_terminales() {
         assert_eq!(
-            fallback_launch(true, Some("alacritty")).as_deref(),
+            fallback_launch_for("lazysubs-eye", true, Some("alacritty")).as_deref(),
             Some("xdg-terminal-exec lazysubs-eye")
         );
         assert_eq!(
-            fallback_launch(false, Some("foot")).as_deref(),
+            fallback_launch_for("lazysubs-eye", false, Some("foot")).as_deref(),
             Some("foot lazysubs-eye")
         );
         assert_eq!(
-            fallback_launch(false, Some("kitty")).as_deref(),
+            fallback_launch_for("lazysubs-eye", false, Some("kitty")).as_deref(),
             Some("kitty lazysubs-eye")
         );
         assert_eq!(
-            fallback_launch(false, Some("alacritty")).as_deref(),
+            fallback_launch_for("lazysubs-eye", false, Some("alacritty")).as_deref(),
             Some("alacritty -e lazysubs-eye")
         );
         assert_eq!(
-            fallback_launch(false, Some("ghostty")).as_deref(),
+            fallback_launch_for("lazysubs-eye", false, Some("ghostty")).as_deref(),
             Some("ghostty -e lazysubs-eye")
         );
-        assert_eq!(fallback_launch(false, None), None);
+        assert_eq!(fallback_launch_for("lazysubs-eye", false, None), None);
     }
 
     #[test]

@@ -820,13 +820,18 @@ pub fn scan_opencode_all_days() -> Vec<(String, Vec<OpenCodeUsageRow>)> {
         DbResolution::File(path) => path,
         _ => return vec![],
     };
-    let Ok(connection) = open_read_only(&path) else {
+    let Ok(mut connection) = open_read_only(&path) else {
         return vec![];
     };
     if validate_schema(&connection).is_err() {
         return vec![];
     }
-    let Ok(mut statement) = connection.prepare(SQL_ALL_DAYS) else {
+    // Una transacción read-only fija la instantánea SQLite antes de recorrer
+    // las filas: entradas añadidas después pertenecen al siguiente backfill.
+    let Ok(transaction) = connection.transaction() else {
+        return vec![];
+    };
+    let Ok(mut statement) = transaction.prepare(SQL_ALL_DAYS) else {
         return vec![];
     };
     let mapped = statement.query_map([], |row| {

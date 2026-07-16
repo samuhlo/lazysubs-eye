@@ -374,11 +374,14 @@ fn cursor_window(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
     read_window(path, offset.saturating_sub(length as u64), length)
 }
 
-fn read_suffix(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
+fn read_suffix(path: &Path, offset: u64, snapshot_size: u64) -> std::io::Result<Vec<u8>> {
     let mut file = std::fs::File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
     let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
+    // El metadata.len() capturado antes del open es el cutoff del scan. Un
+    // append concurrente queda para el siguiente refresh.
+    file.take(snapshot_size.saturating_sub(offset))
+        .read_to_end(&mut bytes)?;
     #[cfg(test)]
     SUFFIX_BYTES_READ.with(|read| read.set(read.get() + bytes.len()));
     Ok(bytes)
@@ -390,6 +393,24 @@ fn process_file(index: &mut DailyPiIndexV1, path: &Path, day_key: &DayKey) {
         Err(_) => return,
     };
     let size = metadata.len();
+    let modified_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|time| time.as_millis())
+        .unwrap_or(0);
+    let (key, dev, ino) = stable_file_identity(path, &metadata);
+    let known = index.files.get(&key).cloned();
+    // Fast path de steady state: solo metadata(), sin abrir ni leer el JSONL.
+    // Los tres campos evitan falsos negativos ante append, reemplazo y rename.
+    if known.as_ref().is_some_and(|state| {
+        state.size == size
+            && state.modified_ms == modified_ms
+            && state.dev == dev
+            && state.ino == ino
+    }) {
+        return;
+    }
     let header_window = match read_window(path, 0, FINGERPRINT_BYTES) {
         Ok(bytes) => bytes,
         Err(_) => return,
@@ -400,9 +421,7 @@ fn process_file(index: &mut DailyPiIndexV1, path: &Path, day_key: &DayKey) {
     if !valid_header(&header_window[..header_end]) {
         return;
     }
-    let (key, dev, ino) = stable_file_identity(path, &metadata);
     let header_fingerprint = hash(&header_window[..header_end]);
-    let known = index.files.get(&key).cloned();
     let rebuild = known.as_ref().is_some_and(|state| {
         if size < state.safe_offset || state.header_fingerprint != header_fingerprint {
             return true;
@@ -419,7 +438,7 @@ fn process_file(index: &mut DailyPiIndexV1, path: &Path, day_key: &DayKey) {
     } else {
         known.as_ref().map(|state| state.safe_offset).unwrap_or(0)
     };
-    let suffix = match read_suffix(path, start) {
+    let suffix = match read_suffix(path, start, size) {
         Ok(bytes) => bytes,
         Err(_) => return,
     };
@@ -452,12 +471,6 @@ fn process_file(index: &mut DailyPiIndexV1, path: &Path, day_key: &DayKey) {
     let cursor_fingerprint = cursor_window(path, safe_offset)
         .map(|window| hash(&window))
         .unwrap_or_default();
-    let modified_ms = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|time| time.as_millis())
-        .unwrap_or(0);
     index.files.insert(
         key,
         FileState {
@@ -1056,6 +1069,23 @@ mod tests {
             .unwrap();
         assert_eq!(state.dev, Some(replacement_metadata.dev()));
         assert_eq!(state.ino, Some(replacement_metadata.ino()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn suffix_respects_snapshot_cutoff_before_concurrent_append() {
+        let root = test_dir("snapshot-cutoff");
+        let file = root.join("session.jsonl");
+        std::fs::write(&file, b"first\n").unwrap();
+        let cutoff = std::fs::metadata(&file).unwrap().len();
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap()
+            .write_all(b"second\n")
+            .unwrap();
+        assert_eq!(read_suffix(&file, 0, cutoff).unwrap(), b"first\n");
         let _ = std::fs::remove_dir_all(root);
     }
 }

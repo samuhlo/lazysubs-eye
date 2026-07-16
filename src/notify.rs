@@ -136,16 +136,28 @@ fn send(alert: &Alert) {
         .resets_at
         .map(|t| format!(" — resetea en {}", output::countdown(t)))
         .unwrap_or_default();
-    let _ = Command::new("notify-send")
+    let result = Command::new("notify-send")
         .args([
             "-a",
             "lazysubs-eye",
             "-u",
             urgency,
-            &format!("{} {}", alert.icon, alert.provider),
-            &format!("{} al {:.0}%{reset}", alert.label, alert.percent),
+            "Límite de IA",
+            &format!(
+                "{} {} · {} al {:.0}%{reset}",
+                alert.icon, alert.provider, alert.label, alert.percent
+            ),
         ])
         .output();
+    if let Err(error) = result {
+        let code = if error.kind() == std::io::ErrorKind::NotFound {
+            crate::diagnostics::LazysubsError::NotifySendNotFound.to_string()
+        } else {
+            "no se pudo ejecutar notify-send".into()
+        };
+        crate::diagnostics::verbose(format!("{code}; las notificaciones quedan desactivadas"));
+        crate::diagnostics::record_last_error("E008", &code);
+    }
 }
 
 /// Punto de entrada: comparar el estado fresco con el persistido y notificar.

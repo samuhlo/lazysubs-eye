@@ -119,7 +119,13 @@ pub fn collect(key: &str, base_url: Option<&str>) -> Result<ProviderStatus> {
     }
     let base_url = base_url.unwrap_or(DEFAULT_BASE_URL);
 
-    let resp = ureq::get(&format!("{base_url}/v1/token_plan/remains"))
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(3))
+        .timeout_read(std::time::Duration::from_secs(5))
+        .timeout_write(std::time::Duration::from_secs(3))
+        .build();
+    let resp = agent
+        .get(&format!("{base_url}/v1/token_plan/remains"))
         .set("Authorization", &format!("Bearer {key}"))
         .set("Content-Type", "application/json")
         .call();

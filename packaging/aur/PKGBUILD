@@ -1,6 +1,6 @@
 # Maintainer: Samuel López (samuhlo) <samuhlodev@gmail.com>
 pkgname=lazysubs-eye-bin
-pkgver=0.13.0
+pkgver=0.14.0
 pkgrel=1
 pkgdesc="AI subscription quota monitor for Omarchy (waybar + TUI)"
 arch=('x86_64')
@@ -14,7 +14,7 @@ optdepends=(
   'xdg-terminal-exec: left-click TUI launcher outside Omarchy'
 )
 source=("$url/releases/download/v$pkgver/lazysubs-eye-$pkgver-x86_64-linux-musl.tar.gz")
-sha256sums=('661e8741c0b9dc0262760350110fa77774a36a2bf203d459c1e86e549b780579')
+sha256sums=('SKIP')
 
 package() {
   cd "lazysubs-eye-$pkgver-x86_64-linux-musl"

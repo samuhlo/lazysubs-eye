@@ -8,7 +8,7 @@ use crate::providers::{ProviderStatus, Status};
 use crate::tokens::{self, fmt_count, ModelTokens};
 use crate::{cache, providers};
 use anyhow::Result;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::symbols;
@@ -18,20 +18,133 @@ use ratatui::widgets::{
     Block, BorderType, Clear, LineGauge, Padding, Paragraph, Row, Sparkline, Table,
 };
 use ratatui::Frame;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 const AUTO_REFRESH: Duration = Duration::from_secs(60);
+const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 
 const ACCENT: Color = Color::Yellow;
 const DIM: Color = Color::DarkGray;
 
+fn env_flag(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+fn should_use_color_for(force: Option<&str>, no_color: Option<&str>, term: Option<&str>) -> bool {
+    env_flag(force) || (!env_flag(no_color) && term != Some("dumb"))
+}
+
+fn should_use_color() -> bool {
+    should_use_color_for(
+        std::env::var("FORCE_COLOR").ok().as_deref(),
+        std::env::var("NO_COLOR").ok().as_deref(),
+        std::env::var("TERM").ok().as_deref(),
+    )
+}
+
+fn is_interrupt_key(key: KeyEvent) -> bool {
+    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+fn accent_color() -> Color {
+    if should_use_color() {
+        ACCENT
+    } else {
+        Color::Reset
+    }
+}
+
+fn dim_color() -> Color {
+    if should_use_color() {
+        DIM
+    } else {
+        Color::Reset
+    }
+}
+
+fn supports_utf8_for(lang: Option<&str>) -> bool {
+    lang.is_some_and(|lang| {
+        let lang = lang.to_ascii_uppercase();
+        lang.contains("UTF-8") || lang.contains("UTF8")
+    })
+}
+
+fn supports_utf8() -> bool {
+    supports_utf8_for(std::env::var("LANG").ok().as_deref())
+}
+
+fn ascii_icon(icon: &str) -> &str {
+    if supports_utf8() {
+        return icon;
+    }
+    match icon {
+        "✳" => "*",
+        "⬡" => "#",
+        "◆" => "+",
+        "⚠" => "!",
+        "✓" => "v",
+        "✗" => "x",
+        _ => "?",
+    }
+}
+
+fn state_marker(state: PanelState, utf8: bool) -> &'static str {
+    match (state, utf8) {
+        (PanelState::Ready, true) => "[✓]",
+        (PanelState::Ready, false) => "[v]",
+        (PanelState::Partial | PanelState::Stale, _) => "[!]",
+        (PanelState::Unavailable | PanelState::NotConfigured, true) => "[✗]",
+        (PanelState::Unavailable | PanelState::NotConfigured, false) => "[x]",
+        (PanelState::Loading, _) => "[…]",
+        (PanelState::Empty, _) => "[-]",
+    }
+}
+
+/// Recorta líneas en tiempo de render: un resize no deja offsets ni alturas
+/// obsoletos en el estado de la aplicación.
+fn layout_with_scroll<'a>(area: Rect, content: &'a [Line<'a>]) -> Vec<Line<'a>> {
+    layout_with_scroll_offset(area, content, 0)
+}
+
+fn layout_with_scroll_offset<'a>(
+    area: Rect,
+    content: &'a [Line<'a>],
+    offset: usize,
+) -> Vec<Line<'a>> {
+    let capacity = area.height as usize;
+    if capacity == 0 {
+        return Vec::new();
+    }
+    let start = offset.min(content.len().saturating_sub(1));
+    let remaining = content.len().saturating_sub(start);
+    if remaining <= capacity {
+        return content[start..].to_vec();
+    }
+    let visible = capacity.saturating_sub(1);
+    let mut lines = content[start..start + visible].to_vec();
+    lines.push(Line::from(format!(
+        "↓ {} línea(s) más",
+        remaining.saturating_sub(visible)
+    )));
+    lines
+}
+
 pub fn run() -> Result<()> {
     let mut terminal = ratatui::init();
-    let result = App::new().run(&mut terminal);
-    ratatui::restore();
-    result
+    let _restore = RestoreTerminal(ratatui::restore);
+    App::new().run(&mut terminal)
+}
+
+struct RestoreTerminal(fn());
+
+impl Drop for RestoreTerminal {
+    fn drop(&mut self) {
+        (self.0)();
+    }
 }
 
 enum Update {
@@ -39,10 +152,98 @@ enum Update {
     Tokens(Vec<ModelTokens>),
     PiTokens(Vec<PiUsageRow>),
     OpenCodeTokens(OpenCodePanelState),
+    BackfillProgress(history::BackfillProgress),
     /// El backfill del historial terminó; toca recargar los agregados.
     Backfilled,
     /// Datos de la gráfica de gasto (para la vista pedida).
     Graph(GraphView, GraphData),
+    ClearLoading {
+        source: ScanSource,
+        timed_out: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScanSource {
+    Claude,
+    Pi,
+    OpenCode,
+}
+
+/// El worker posee este guard. Tanto un retorno normal como un panic liberan
+/// el estado loading enviando un mensaje al hilo de UI.
+struct LoadingGuard {
+    source: ScanSource,
+    expire_at: Instant,
+    tx: mpsc::Sender<Update>,
+}
+
+/// Coalesce refreshes sin bloquear el hilo de UI. AtomicBool basta porque el
+/// dato solo expresa ownership del worker; los resultados siguen por mpsc.
+#[derive(Default)]
+struct RefreshScheduler {
+    active: Arc<AtomicBool>,
+    pending: AtomicBool,
+    pending_force: AtomicBool,
+}
+
+impl RefreshScheduler {
+    fn maybe_schedule_refresh(&self, force: bool) -> bool {
+        if self
+            .active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            return true;
+        }
+        self.pending.store(true, Ordering::Release);
+        if force {
+            self.pending_force.store(true, Ordering::Release);
+        }
+        false
+    }
+
+    fn finished(&self) -> Option<bool> {
+        self.active.store(false, Ordering::Release);
+        self.pending
+            .swap(false, Ordering::AcqRel)
+            .then(|| self.pending_force.swap(false, Ordering::AcqRel))
+    }
+}
+
+impl LoadingGuard {
+    fn new(source: ScanSource, tx: mpsc::Sender<Update>, timeout: Duration) -> Self {
+        Self {
+            source,
+            expire_at: Instant::now() + timeout,
+            tx,
+        }
+    }
+
+    fn expired(&self, now: Instant) -> bool {
+        now >= self.expire_at
+    }
+}
+
+impl Drop for LoadingGuard {
+    fn drop(&mut self) {
+        let _ = self.tx.send(Update::ClearLoading {
+            source: self.source,
+            timed_out: self.expired(Instant::now()),
+        });
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)] // Partial/NotConfigured se activan al integrar diagnósticos por panel.
+enum PanelState {
+    Loading,
+    Ready,
+    Empty,
+    Partial,
+    Unavailable,
+    Stale,
+    NotConfigured,
 }
 
 struct App {
@@ -51,16 +252,19 @@ struct App {
     pi_tokens: Vec<PiUsageRow>,
     opencode_tokens: OpenCodePanelState,
     refreshing: bool,
+    refresh_scheduler: RefreshScheduler,
     tx: mpsc::Sender<Update>,
     rx: mpsc::Receiver<Update>,
     tokens_scanning: bool,
     pi_tokens_scanning: bool,
     opencode_scanning: bool,
+    scan_deadlines: [Option<Instant>; 3],
     last_refresh: Instant,
     /// Periodo de los paneles de tokens (hoy/semana/mes).
     period: Period,
     /// Agregados del historial por fuente para el periodo actual.
     history_rows: HashMap<&'static str, Vec<history::UsageRow>>,
+    history_states: HashMap<&'static str, history::IngestState>,
     /// Serie diaria (sparkline) por fuente.
     history_spark: HashMap<&'static str, Vec<u64>>,
     /// Gráfica de gasto: abierta o no, vista actual y datos (None = cargando).
@@ -70,6 +274,11 @@ struct App {
     /// Cursor del panel de opciones; None = cerrado.
     settings_cursor: Option<usize>,
     settings_error: Option<String>,
+    backfill_progress: Option<history::BackfillProgress>,
+    backfill_active: bool,
+    backfill_cancelled: Arc<AtomicBool>,
+    show_help: bool,
+    scroll_offset: usize,
 }
 
 /// Ítems del panel de opciones. Los índices apuntan a PROVIDERS / PANELS.
@@ -174,20 +383,78 @@ impl App {
             pi_tokens: vec![],
             opencode_tokens: OpenCodePanelState::Loading,
             refreshing: false,
+            refresh_scheduler: RefreshScheduler::default(),
             tx,
             rx,
             tokens_scanning: false,
             pi_tokens_scanning: false,
             opencode_scanning: false,
+            scan_deadlines: [None; 3],
             last_refresh: Instant::now(),
             period,
             history_rows: HashMap::new(),
+            history_states: HashMap::new(),
             history_spark: HashMap::new(),
             graph_open: false,
             graph_view: GraphView::Week,
             graph_data: None,
             settings_cursor: None,
             settings_error: None,
+            backfill_progress: None,
+            backfill_active: false,
+            backfill_cancelled: Arc::new(AtomicBool::new(false)),
+            show_help: false,
+            scroll_offset: 0,
+        }
+    }
+
+    fn token_panel_state(&self, idx: usize) -> PanelState {
+        match idx {
+            0 if self.tokens_scanning => PanelState::Loading,
+            0 if self.tokens.is_empty() => PanelState::Empty,
+            0 => PanelState::Ready,
+            1 if self.pi_tokens_scanning => PanelState::Loading,
+            1 if self.pi_tokens.is_empty() => PanelState::Empty,
+            1 => PanelState::Ready,
+            _ => match &self.opencode_tokens {
+                OpenCodePanelState::Loading => PanelState::Loading,
+                OpenCodePanelState::Ready(_) => PanelState::Ready,
+                OpenCodePanelState::Empty => PanelState::Empty,
+                OpenCodePanelState::Stale { .. } => PanelState::Stale,
+                OpenCodePanelState::Unavailable(_) => PanelState::Unavailable,
+            },
+        }
+    }
+
+    fn history_panel_state(&self, source: &str) -> PanelState {
+        if !crate::config::get().stats.enabled {
+            return PanelState::NotConfigured;
+        }
+        if self.backfill_active {
+            return if self
+                .backfill_progress
+                .as_ref()
+                .is_some_and(|progress| progress.failed_days > 0)
+            {
+                PanelState::Partial
+            } else {
+                PanelState::Loading
+            };
+        }
+        if let Some(state) = self.history_states.get(source) {
+            match state {
+                history::IngestState::Partial { .. } => return PanelState::Partial,
+                history::IngestState::InProgress { .. } | history::IngestState::Pending { .. } => {
+                    return PanelState::Loading
+                }
+                history::IngestState::Failed { .. } => return PanelState::Unavailable,
+                history::IngestState::Ingested { .. } | history::IngestState::Skipped { .. } => {}
+            }
+        }
+        match self.history_rows.get(source) {
+            Some(rows) if !rows.is_empty() => PanelState::Ready,
+            Some(_) => PanelState::Empty,
+            None => PanelState::Unavailable,
         }
     }
 
@@ -207,12 +474,21 @@ impl App {
         if !crate::config::get().stats.enabled {
             self.history_rows.remove(source);
             self.history_spark.remove(source);
+            self.history_states.remove(source);
             return;
         }
         self.history_rows
             .insert(source, history::period_rows(source, self.period));
         self.history_spark
             .insert(source, history::sparkline(source));
+        match history::latest_source_state(source) {
+            Some(state) => {
+                self.history_states.insert(source, state);
+            }
+            None => {
+                self.history_states.remove(source);
+            }
+        }
     }
 
     fn reload_history(&mut self) {
@@ -359,16 +635,27 @@ impl App {
 
     /// Lanza el backfill del historial en segundo plano (una sola vez de por
     /// vida); al terminar avisa para recargar los agregados.
-    fn spawn_backfill(&self) {
+    fn spawn_backfill(&mut self) {
+        if self.backfill_active {
+            return;
+        }
+        self.backfill_active = true;
+        self.backfill_cancelled.store(false, Ordering::Release);
         let tx = self.tx.clone();
+        let cancelled = Arc::clone(&self.backfill_cancelled);
         std::thread::spawn(move || {
-            history::maybe_backfill();
+            history::maybe_backfill_with_progress_cancelled(
+                |progress| {
+                    let _ = tx.send(Update::BackfillProgress(progress));
+                },
+                || cancelled.load(Ordering::Acquire),
+            );
             let _ = tx.send(Update::Backfilled);
         });
     }
 
     fn refresh(&mut self, force: bool) {
-        if self.refreshing {
+        if !self.refresh_scheduler.maybe_schedule_refresh(force) {
             return;
         }
         self.refreshing = true;
@@ -392,18 +679,21 @@ impl App {
         if panels.panel("claude_tokens") && self.begin_token_scan() {
             let tx = self.tx.clone();
             std::thread::spawn(move || {
+                let _guard = LoadingGuard::new(ScanSource::Claude, tx.clone(), SCAN_TIMEOUT);
                 let _ = tx.send(Update::Tokens(tokens::claude_today()));
             });
         }
         if panels.panel("pi_tokens") && self.begin_pi_token_scan() {
             let tx = self.tx.clone();
             std::thread::spawn(move || {
+                let _guard = LoadingGuard::new(ScanSource::Pi, tx.clone(), SCAN_TIMEOUT);
                 let _ = tx.send(Update::PiTokens(pi_tokens::scan_pi_today()));
             });
         }
         if panels.panel("opencode_tokens") && self.begin_opencode_token_scan() {
             let tx = self.tx.clone();
             std::thread::spawn(move || {
+                let _guard = LoadingGuard::new(ScanSource::OpenCode, tx.clone(), SCAN_TIMEOUT);
                 let _ = tx.send(Update::OpenCodeTokens(
                     opencode_tokens::scan_opencode_today(),
                 ));
@@ -416,6 +706,7 @@ impl App {
             return false;
         }
         self.tokens_scanning = true;
+        self.scan_deadlines[0] = Some(Instant::now() + SCAN_TIMEOUT);
         true
     }
 
@@ -424,6 +715,7 @@ impl App {
             return false;
         }
         self.pi_tokens_scanning = true;
+        self.scan_deadlines[1] = Some(Instant::now() + SCAN_TIMEOUT);
         true
     }
 
@@ -432,7 +724,29 @@ impl App {
             return false;
         }
         self.opencode_scanning = true;
+        self.scan_deadlines[2] = Some(Instant::now() + SCAN_TIMEOUT);
         true
+    }
+
+    fn clear_loading(&mut self, source: ScanSource) {
+        let (flag, deadline) = match source {
+            ScanSource::Claude => (&mut self.tokens_scanning, &mut self.scan_deadlines[0]),
+            ScanSource::Pi => (&mut self.pi_tokens_scanning, &mut self.scan_deadlines[1]),
+            ScanSource::OpenCode => (&mut self.opencode_scanning, &mut self.scan_deadlines[2]),
+        };
+        *flag = false;
+        *deadline = None;
+    }
+
+    fn clear_expired_loading(&mut self, now: Instant) {
+        for (idx, source) in [ScanSource::Claude, ScanSource::Pi, ScanSource::OpenCode]
+            .into_iter()
+            .enumerate()
+        {
+            if self.scan_deadlines[idx].is_some_and(|deadline| now >= deadline) {
+                self.clear_loading(source);
+            }
+        }
     }
 
     fn apply_update(&mut self, update: Update) {
@@ -440,10 +754,13 @@ impl App {
             Update::Status(status) => {
                 self.status = Some(status);
                 self.refreshing = false;
+                if let Some(force) = self.refresh_scheduler.finished() {
+                    self.refresh(force);
+                }
             }
             Update::Tokens(tokens) => {
                 self.tokens = tokens;
-                self.tokens_scanning = false;
+                self.clear_loading(ScanSource::Claude);
                 history::record_source(
                     history::SOURCE_CLAUDE,
                     &history::rows_from_claude(&self.tokens),
@@ -452,7 +769,7 @@ impl App {
             }
             Update::PiTokens(tokens) => {
                 self.pi_tokens = tokens;
-                self.pi_tokens_scanning = false;
+                self.clear_loading(ScanSource::Pi);
                 history::record_source(history::SOURCE_PI, &history::rows_from_pi(&self.pi_tokens));
                 self.reload_source_history(history::SOURCE_PI);
             }
@@ -465,7 +782,7 @@ impl App {
                     ) => OpenCodePanelState::Stale { rows, reason },
                     (_, state) => state,
                 };
-                self.opencode_scanning = false;
+                self.clear_loading(ScanSource::OpenCode);
                 // Solo se ingiere cuando hay datos reales (no en fallos: eso
                 // sobrescribiría el día con cero y perdería lo ya registrado).
                 if let OpenCodePanelState::Ready(rows) | OpenCodePanelState::Stale { rows, .. } =
@@ -479,16 +796,25 @@ impl App {
                 self.reload_source_history(history::SOURCE_OPENCODE);
             }
             Update::Backfilled => {
+                self.backfill_progress = None;
+                self.backfill_active = false;
                 self.reload_history();
                 if self.graph_open {
                     self.reload_graph();
                 }
             }
+            Update::BackfillProgress(progress) => self.backfill_progress = Some(progress),
             Update::Graph(view, data) => {
                 // Ignora respuestas de una vista ya cambiada.
                 if view == self.graph_view {
                     self.graph_data = Some(data);
                 }
+            }
+            Update::ClearLoading { source, timed_out } => {
+                // El deadline también queda disponible para diagnósticos; la
+                // recuperación es idempotente en ambos casos.
+                let _ = timed_out;
+                self.clear_loading(source);
             }
         }
     }
@@ -500,6 +826,7 @@ impl App {
             self.reload_history();
         }
         loop {
+            self.clear_expired_loading(Instant::now());
             while let Ok(update) = self.rx.try_recv() {
                 self.apply_update(update);
             }
@@ -507,7 +834,11 @@ impl App {
             if event::poll(Duration::from_millis(200))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
-                        if self.settings_cursor.is_some() {
+                        if is_interrupt_key(key) {
+                            return Ok(());
+                        } else if self.show_help {
+                            self.show_help = false;
+                        } else if self.settings_cursor.is_some() {
                             match key.code {
                                 KeyCode::Char('q') | KeyCode::Char('o') | KeyCode::Esc => {
                                     self.settings_cursor = None
@@ -520,11 +851,21 @@ impl App {
                                 _ => {}
                             }
                         } else {
+                            // El banner es informativo: cualquier interacción
+                            // lo descarta; el worker puede publicar progreso nuevo.
+                            self.backfill_progress = None;
                             let stats_on = crate::config::get().stats.enabled;
                             match key.code {
                                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                                KeyCode::Char('?') => self.show_help = true,
                                 KeyCode::Char('r') => self.refresh(true),
                                 KeyCode::Char('o') => self.settings_cursor = Some(1),
+                                KeyCode::Char('j') | KeyCode::Down => {
+                                    self.scroll_offset = self.scroll_offset.saturating_add(1)
+                                }
+                                KeyCode::Char('k') | KeyCode::Up => {
+                                    self.scroll_offset = self.scroll_offset.saturating_sub(1)
+                                }
                                 KeyCode::Char('g') if stats_on => {
                                     self.graph_open = !self.graph_open;
                                     if self.graph_open {
@@ -556,6 +897,21 @@ impl App {
     }
 
     fn draw(&self, f: &mut Frame) {
+        if f.area().width < 80 || f.area().height < 24 {
+            f.render_widget(
+                Paragraph::new(format!(
+                    "terminal demasiado pequeño ({}×{}); mínimo recomendado: 80×24",
+                    f.area().width,
+                    f.area().height
+                ))
+                .alignment(Alignment::Center),
+                f.area(),
+            );
+            if self.show_help {
+                self.draw_help(f);
+            }
+            return;
+        }
         let Some(status) = &self.status else {
             f.render_widget(
                 Paragraph::new("cargando…")
@@ -577,23 +933,39 @@ impl App {
                 .collect()
         };
 
-        let mut constraints = vec![Constraint::Length(1)]; // cabecera
-        for p in &providers {
-            constraints.push(Constraint::Length(provider_height(p)));
+        let mut sections: Vec<(Option<&ProviderStatus>, Option<usize>, u16)> = providers
+            .iter()
+            .map(|provider| (Some(*provider), None, provider_height(provider)))
+            .collect();
+        sections.extend(
+            panels
+                .iter()
+                .map(|idx| (None, Some(*idx), self.token_panel_height(*idx))),
+        );
+        let start = self.scroll_offset.min(sections.len().saturating_sub(1));
+        let available = f.area().height.saturating_sub(2);
+        let mut end = start;
+        let mut used = 0u16;
+        while end < sections.len() && (end == start || used + sections[end].2 <= available) {
+            used = used.saturating_add(sections[end].2);
+            end += 1;
         }
-        for &idx in &panels {
-            constraints.push(Constraint::Length(self.token_panel_height(idx)));
+        let visible = &sections[start..end];
+        let mut constraints = vec![Constraint::Length(1)]; // cabecera
+        for (_, _, height) in visible {
+            constraints.push(Constraint::Length(*height));
         }
         constraints.push(Constraint::Min(0)); // relleno (o la gráfica)
         constraints.push(Constraint::Length(1)); // pie
         let areas = Layout::vertical(constraints).split(f.area());
 
         self.draw_header(f, areas[0]);
-        for (i, p) in providers.iter().enumerate() {
-            draw_provider(f, areas[i + 1], p);
-        }
-        for (section, &idx) in (providers.len() + 1..).zip(panels.iter()) {
-            self.draw_token_panel(f, areas[section], idx);
+        for (i, (provider, panel, _)) in visible.iter().enumerate() {
+            if let Some(provider) = provider {
+                draw_provider(f, areas[i + 1], provider);
+            } else if let Some(panel) = panel {
+                self.draw_token_panel(f, areas[i + 1], *panel);
+            }
         }
         if self.graph_open {
             // El penúltimo área es el relleno Min(0): ahí va la gráfica.
@@ -603,6 +975,42 @@ impl App {
         if self.settings_cursor.is_some() {
             self.draw_settings(f);
         }
+        if self.show_help {
+            self.draw_help(f);
+        }
+    }
+
+    fn draw_help(&self, f: &mut Frame) {
+        let width = 54.min(f.area().width.saturating_sub(2));
+        let height = 10.min(f.area().height.saturating_sub(2));
+        let area = Rect {
+            x: (f.area().width - width) / 2,
+            y: (f.area().height - height) / 2,
+            width,
+            height,
+        };
+        f.render_widget(Clear, area);
+        let lines = vec![
+            Line::from("q / Esc  salir"),
+            Line::from("r        refrescar"),
+            Line::from("o        opciones"),
+            Line::from("j / k    desplazar paneles"),
+            Line::from("t / Tab  periodo de tokens"),
+            Line::from("g / v    gráfica / vista"),
+            Line::from("?        cerrar ayuda"),
+            Line::from("Estados: [✓] listo · [!] aviso · [✗] crítico"),
+        ];
+        let lines = layout_with_scroll(
+            Rect {
+                height: area.height.saturating_sub(2),
+                ..area
+            },
+            &lines,
+        );
+        f.render_widget(
+            Paragraph::new(lines).block(bordered(" ayuda ").padding(Padding::horizontal(1))),
+            area,
+        );
     }
 
     fn draw_graph(&self, f: &mut Frame, area: Rect) {
@@ -652,13 +1060,14 @@ impl App {
         for (i, item) in items.iter().enumerate().skip(offset).take(inner_rows) {
             let selected = i == cursor;
             let line = match item {
-                Setting::Section(name) => {
-                    Line::from(Span::styled(format!("── {name} "), Style::new().fg(DIM)))
-                }
+                Setting::Section(name) => Line::from(Span::styled(
+                    format!("── {name} "),
+                    Style::new().fg(dim_color()),
+                )),
                 _ => {
                     let (label, val) = setting_row(item, &config);
                     let style = if selected {
-                        Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+                        Style::new().fg(accent_color()).add_modifier(Modifier::BOLD)
                     } else {
                         Style::new()
                     };
@@ -670,13 +1079,17 @@ impl App {
         if let Some(err) = &self.settings_error {
             lines.push(Line::from(Span::styled(
                 format!(" ⚠ {err}"),
-                Style::new().fg(Color::Red),
+                Style::new().fg(if should_use_color() {
+                    Color::Red
+                } else {
+                    Color::Reset
+                }),
             )));
         }
 
         let block = bordered(" opciones ").title_bottom(Span::styled(
             " ␣ cambiar · ←→ ajustar · o cerrar ",
-            Style::new().fg(DIM),
+            Style::new().fg(dim_color()),
         ));
         f.render_widget(Paragraph::new(lines).block(block), area);
     }
@@ -686,9 +1099,9 @@ impl App {
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     " lazysubs-eye ",
-                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+                    Style::new().fg(accent_color()).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("· cuotas de IA", Style::new().fg(DIM)),
+                Span::styled("· cuotas de IA", Style::new().fg(dim_color())),
             ])),
             area,
         );
@@ -739,8 +1152,11 @@ impl App {
 
     fn panel_title(&self, idx: usize) -> String {
         // Doble espacio tras el ✳ porque en muchas fuentes es un glifo ancho.
-        const BASES: [&str; 3] = ["✳  Claude Code", "Pi", "OpenCode"];
-        let base = BASES[idx];
+        let base = match idx {
+            0 => format!("{}  Claude Code", ascii_icon("✳")),
+            1 => "Pi".into(),
+            _ => "OpenCode".into(),
+        };
         // Nota de datos rancios solo en el panel OpenCode de hoy.
         if idx == 2 && self.period == Period::Today {
             if let OpenCodePanelState::Stale { reason, .. } = &self.opencode_tokens {
@@ -774,21 +1190,24 @@ impl App {
             f.render_widget(
                 Sparkline::default()
                     .data(series.as_slice())
-                    .style(Style::new().fg(if crate::config::get().colors {
-                        ACCENT
-                    } else {
-                        Color::Reset
-                    })),
+                    .style(
+                        Style::new().fg(if crate::config::get().colors && should_use_color() {
+                            ACCENT
+                        } else {
+                            Color::Reset
+                        }),
+                    ),
                 area,
             );
         }
     }
 
     fn draw_today_body(&self, f: &mut Frame, area: Rect, idx: usize) {
+        let _state = self.token_panel_state(idx);
         // Vacío hoy → mensaje (como OpenCode), para que el panel no desaparezca.
         if (idx == 0 && self.tokens.is_empty()) || (idx == 1 && self.pi_tokens.is_empty()) {
             f.render_widget(
-                Paragraph::new("sin uso hoy").style(Style::new().fg(DIM)),
+                Paragraph::new("sin uso hoy").style(Style::new().fg(dim_color())),
                 area,
             );
             return;
@@ -796,7 +1215,7 @@ impl App {
         match idx {
             0 => {
                 let header = Row::new(vec!["modelo", "req", "in", "out", "cache→", "cache+"])
-                    .style(Style::new().fg(DIM).add_modifier(Modifier::BOLD));
+                    .style(Style::new().fg(dim_color()).add_modifier(Modifier::BOLD));
                 let rows: Vec<Row> = self
                     .tokens
                     .iter()
@@ -825,7 +1244,7 @@ impl App {
                 let header = Row::new(vec![
                     "provider", "modelo", "in", "out", "cache→", "cache+", "total", "coste",
                 ])
-                .style(Style::new().fg(DIM).add_modifier(Modifier::BOLD));
+                .style(Style::new().fg(dim_color()).add_modifier(Modifier::BOLD));
                 let rows: Vec<Row> = self
                     .pi_tokens
                     .iter()
@@ -852,13 +1271,16 @@ impl App {
                     OpenCodePanelState::Unavailable(reason) => Some(unavailable_text(*reason)),
                 };
                 if let Some(message) = message {
-                    f.render_widget(Paragraph::new(message).style(Style::new().fg(DIM)), area);
+                    f.render_widget(
+                        Paragraph::new(message).style(Style::new().fg(dim_color())),
+                        area,
+                    );
                     return;
                 }
                 let header = Row::new(vec![
                     "provider", "modelo", "in", "out", "raz", "cache→", "cache+", "total", "coste",
                 ])
-                .style(Style::new().fg(DIM).add_modifier(Modifier::BOLD));
+                .style(Style::new().fg(dim_color()).add_modifier(Modifier::BOLD));
                 let rows: Vec<Row> = match &self.opencode_tokens {
                     OpenCodePanelState::Ready(rows) | OpenCodePanelState::Stale { rows, .. } => {
                         rows.iter().map(opencode_table_row).collect()
@@ -873,10 +1295,11 @@ impl App {
     /// Tabla agregada del historial (semana/mes) para una fuente: una fila por
     /// (provider, modelo) con totales y coste del periodo.
     fn draw_history_body(&self, f: &mut Frame, area: Rect, source: &'static str) {
+        let _state = self.history_panel_state(source);
         let rows = self.history_rows.get(source);
         if rows.map(|r| r.is_empty()).unwrap_or(true) {
             f.render_widget(
-                Paragraph::new("sin datos del periodo").style(Style::new().fg(DIM)),
+                Paragraph::new("sin datos del periodo").style(Style::new().fg(dim_color())),
                 area,
             );
             return;
@@ -884,7 +1307,7 @@ impl App {
         let header = Row::new(vec![
             "provider", "modelo", "in", "out", "cache", "total", "coste",
         ])
-        .style(Style::new().fg(DIM).add_modifier(Modifier::BOLD));
+        .style(Style::new().fg(dim_color()).add_modifier(Modifier::BOLD));
         let table_rows: Vec<Row> = rows
             .unwrap()
             .iter()
@@ -920,34 +1343,41 @@ impl App {
         let [left, right] =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(24)]).areas(area);
         let mut spans = vec![
-            Span::styled(" q ", Style::new().fg(ACCENT)),
-            Span::styled("salir  ", Style::new().fg(DIM)),
-            Span::styled("r ", Style::new().fg(ACCENT)),
-            Span::styled("refrescar  ", Style::new().fg(DIM)),
-            Span::styled("o ", Style::new().fg(ACCENT)),
-            Span::styled("opciones", Style::new().fg(DIM)),
+            Span::styled(" q ", Style::new().fg(accent_color())),
+            Span::styled("salir  ", Style::new().fg(dim_color())),
+            Span::styled("r ", Style::new().fg(accent_color())),
+            Span::styled("refrescar  ", Style::new().fg(dim_color())),
+            Span::styled("o ", Style::new().fg(accent_color())),
+            Span::styled("opciones", Style::new().fg(dim_color())),
+            Span::styled("  j/k ", Style::new().fg(accent_color())),
+            Span::styled("scroll", Style::new().fg(dim_color())),
         ];
         if crate::config::get().stats.enabled {
             if self.graph_open {
-                spans.push(Span::styled("  g ", Style::new().fg(ACCENT)));
-                spans.push(Span::styled("cerrar  ", Style::new().fg(DIM)));
-                spans.push(Span::styled("v ", Style::new().fg(ACCENT)));
+                spans.push(Span::styled("  g ", Style::new().fg(accent_color())));
+                spans.push(Span::styled("cerrar  ", Style::new().fg(dim_color())));
+                spans.push(Span::styled("v ", Style::new().fg(accent_color())));
                 spans.push(Span::styled(
                     format!("vista · {}", self.graph_view.label()),
-                    Style::new().fg(DIM),
+                    Style::new().fg(dim_color()),
                 ));
             } else {
-                spans.push(Span::styled("  t ", Style::new().fg(ACCENT)));
+                spans.push(Span::styled("  t ", Style::new().fg(accent_color())));
                 spans.push(Span::styled(
                     format!("periodo · {}  ", self.period.label()),
-                    Style::new().fg(DIM),
+                    Style::new().fg(dim_color()),
                 ));
-                spans.push(Span::styled("g ", Style::new().fg(ACCENT)));
-                spans.push(Span::styled("gráfica", Style::new().fg(DIM)));
+                spans.push(Span::styled("g ", Style::new().fg(accent_color())));
+                spans.push(Span::styled("gráfica", Style::new().fg(dim_color())));
             }
         }
         f.render_widget(Paragraph::new(Line::from(spans)), left);
-        let state = if self.refreshing {
+        let state = if let Some(progress) = &self.backfill_progress {
+            format!(
+                "backfill {}/{} · {} fallo(s)",
+                progress.completed_days, progress.total_days, progress.failed_days
+            )
+        } else if self.refreshing {
             "actualizando…".to_string()
         } else {
             let age = chrono::Utc::now().timestamp() - status.fetched_at;
@@ -955,10 +1385,16 @@ impl App {
         };
         f.render_widget(
             Paragraph::new(state)
-                .style(Style::new().fg(DIM))
+                .style(Style::new().fg(dim_color()))
                 .alignment(Alignment::Right),
             right,
         );
+    }
+}
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.backfill_cancelled.store(true, Ordering::Release);
     }
 }
 
@@ -1032,7 +1468,7 @@ fn draw_braille_bars(f: &mut Frame, area: Rect, values: &[u64]) {
         return;
     }
     let max = values.iter().copied().max().unwrap_or(1).max(1) as f64;
-    let color = if crate::config::get().colors {
+    let color = if crate::config::get().colors && should_use_color() {
         ACCENT
     } else {
         Color::Reset
@@ -1089,7 +1525,10 @@ fn draw_graph_labels(f: &mut Frame, area: Rect, labels: &[String]) {
         }
     }
     let text: String = buf.into_iter().collect();
-    f.render_widget(Paragraph::new(text).style(Style::new().fg(DIM)), area);
+    f.render_widget(
+        Paragraph::new(text).style(Style::new().fg(dim_color())),
+        area,
+    );
 }
 
 /// Recorta cuentas largas (emails) para que quepan en el título del panel.
@@ -1117,10 +1556,10 @@ fn provider_height(p: &ProviderStatus) -> u16 {
 fn bordered<'a>(title: impl Into<std::borrow::Cow<'a, str>>) -> Block<'a> {
     Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(DIM))
+        .border_style(Style::new().fg(dim_color()))
         .title(Span::styled(
             title,
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::new().fg(accent_color()).add_modifier(Modifier::BOLD),
         ))
 }
 
@@ -1211,7 +1650,7 @@ fn setting_row(item: &Setting, config: &crate::config::Config) -> (String, Strin
 
 fn percent_color(pct: f64) -> Color {
     let config = crate::config::get();
-    if !config.colors {
+    if !config.colors || !should_use_color() {
         return Color::Reset; // color del terminal, sin semáforo
     }
     if pct >= config.critical_at {
@@ -1221,6 +1660,18 @@ fn percent_color(pct: f64) -> Color {
     } else {
         Color::Green
     }
+}
+
+fn quota_marker(pct: f64) -> &'static str {
+    let config = crate::config::get();
+    let state = if pct >= config.critical_at {
+        PanelState::Unavailable
+    } else if pct >= config.warning_at {
+        PanelState::Partial
+    } else {
+        PanelState::Ready
+    };
+    state_marker(state, supports_utf8())
 }
 
 fn draw_provider(f: &mut Frame, area: Rect, p: &ProviderStatus) {
@@ -1236,14 +1687,18 @@ fn draw_provider(f: &mut Frame, area: Rect, p: &ProviderStatus) {
     }
     let plan_title = format!(" {} ", bits.join(" · "));
     // Doble espacio tras el icono: glifos como ✳ son anchos en muchas fuentes.
-    let block = bordered(format!(" {}  {} ", p.icon, p.name))
-        .title(Span::styled(plan_title, Style::new().fg(DIM)));
+    let block = bordered(format!(" {}  {} ", ascii_icon(&p.icon), p.name))
+        .title(Span::styled(plan_title, Style::new().fg(dim_color())));
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if let Some(err) = &p.error {
         f.render_widget(
-            Paragraph::new(err.as_str()).style(Style::new().fg(Color::Red)),
+            Paragraph::new(err.as_str()).style(Style::new().fg(if should_use_color() {
+                Color::Red
+            } else {
+                Color::Reset
+            })),
             inner,
         );
         return;
@@ -1267,7 +1722,7 @@ fn draw_provider(f: &mut Frame, area: Rect, p: &ProviderStatus) {
         let label_style = if w.active {
             Style::new().add_modifier(Modifier::BOLD)
         } else {
-            Style::new().fg(DIM)
+            Style::new().fg(dim_color())
         };
         f.render_widget(
             Paragraph::new(format!(" {}", w.label)).style(label_style),
@@ -1277,9 +1732,13 @@ fn draw_provider(f: &mut Frame, area: Rect, p: &ProviderStatus) {
         f.render_widget(
             LineGauge::default()
                 .ratio((w.used_percent / 100.0).clamp(0.0, 1.0))
-                .label(format!("{:>3.0}%", w.used_percent))
+                .label(format!(
+                    "{} {:>3.0}%",
+                    quota_marker(w.used_percent),
+                    w.used_percent
+                ))
                 .filled_style(Style::new().fg(percent_color(w.used_percent)))
-                .unfilled_style(Style::new().fg(DIM))
+                .unfilled_style(Style::new().fg(dim_color()))
                 .line_set(symbols::line::THICK),
             gauge_a,
         );
@@ -1290,7 +1749,7 @@ fn draw_provider(f: &mut Frame, area: Rect, p: &ProviderStatus) {
             .unwrap_or_default();
         f.render_widget(
             Paragraph::new(reset)
-                .style(Style::new().fg(DIM))
+                .style(Style::new().fg(dim_color()))
                 .alignment(Alignment::Right),
             reset_a,
         );
@@ -1298,7 +1757,7 @@ fn draw_provider(f: &mut Frame, area: Rect, p: &ProviderStatus) {
 
     if let Some(line) = reset_credits_line {
         f.render_widget(
-            Paragraph::new(line).style(Style::new().fg(DIM)),
+            Paragraph::new(line).style(Style::new().fg(dim_color())),
             rows[window_rows],
         );
     }
@@ -1309,7 +1768,7 @@ trait ParagraphExt<'a> {
 }
 impl<'a> ParagraphExt<'a> for Paragraph<'a> {
     fn fg_dim(self) -> Paragraph<'a> {
-        self.style(Style::new().fg(DIM))
+        self.style(Style::new().fg(dim_color()))
     }
 }
 
@@ -1448,6 +1907,160 @@ mod tests {
         }));
         assert!(app.status.is_some());
         assert!(app.pi_tokens_scanning);
+    }
+
+    #[test]
+    fn backfill_progress_is_observable_without_waiting_for_completion() {
+        let mut app = App::new();
+        app.apply_update(Update::BackfillProgress(history::BackfillProgress {
+            current_day: Some("2026-07-14".into()),
+            completed_days: 4,
+            total_days: 12,
+            failed_days: 1,
+        }));
+        assert_eq!(app.backfill_progress.as_ref().unwrap().completed_days, 4);
+    }
+
+    #[test]
+    fn dropping_app_requests_cooperative_backfill_cancellation() {
+        let app = App::new();
+        let cancelled = Arc::clone(&app.backfill_cancelled);
+        assert!(!cancelled.load(Ordering::Acquire));
+        drop(app);
+        assert!(cancelled.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn panel_state_serializa_y_cubre_los_paneles() {
+        assert_eq!(
+            serde_json::to_string(&PanelState::Stale).unwrap(),
+            "\"Stale\""
+        );
+        let mut app = App::new();
+        assert_eq!(app.token_panel_state(0), PanelState::Empty);
+        app.tokens_scanning = true;
+        assert_eq!(app.token_panel_state(0), PanelState::Loading);
+        app.opencode_tokens = OpenCodePanelState::Unavailable(OpenCodeUnavailableReason::Busy);
+        assert_eq!(app.token_panel_state(2), PanelState::Unavailable);
+        assert_eq!(
+            app.history_panel_state(history::SOURCE_PI),
+            PanelState::Unavailable
+        );
+        app.history_rows.insert(history::SOURCE_PI, vec![]);
+        assert_eq!(
+            app.history_panel_state(history::SOURCE_PI),
+            PanelState::Empty
+        );
+        app.history_states.insert(
+            history::SOURCE_PI,
+            history::IngestState::Failed {
+                day: "2026-07-14".into(),
+                attempted_at: 1,
+                reason: "fallo saneado".into(),
+            },
+        );
+        assert_eq!(
+            app.history_panel_state(history::SOURCE_PI),
+            PanelState::Unavailable
+        );
+        app.backfill_active = true;
+        app.backfill_progress = Some(history::BackfillProgress {
+            failed_days: 1,
+            ..history::BackfillProgress::default()
+        });
+        assert_eq!(
+            app.history_panel_state(history::SOURCE_PI),
+            PanelState::Partial
+        );
+    }
+
+    #[test]
+    fn scroll_recorta_indica_y_respeta_offset_y_resize() {
+        let content: Vec<Line> = (0..30).map(|n| Line::from(format!("línea {n}"))).collect();
+        let first = layout_with_scroll(Rect::new(0, 0, 40, 10), &content);
+        assert_eq!(first.len(), 10);
+        assert_eq!(first[0].to_string(), "línea 0");
+        assert!(first[9].to_string().contains("21 línea(s) más"));
+
+        let end = layout_with_scroll_offset(Rect::new(0, 0, 40, 10), &content, 25);
+        assert_eq!(end.len(), 5);
+        assert_eq!(end[0].to_string(), "línea 25");
+
+        let resized = layout_with_scroll_offset(Rect::new(0, 0, 40, 3), &content, 28);
+        assert_eq!(resized.len(), 2);
+        assert_eq!(resized[1].to_string(), "línea 29");
+    }
+
+    #[test]
+    fn loading_guard_libera_en_drop_y_el_timeout_recupera_el_estado() {
+        let mut app = App::new();
+        assert!(app.begin_token_scan());
+        {
+            let guard =
+                LoadingGuard::new(ScanSource::Claude, app.tx.clone(), Duration::from_millis(1));
+            assert!(!guard.expired(Instant::now()));
+        }
+        app.apply_update(app.rx.recv().unwrap());
+        assert!(!app.tokens_scanning);
+
+        assert!(app.begin_pi_token_scan());
+        app.scan_deadlines[1] = Some(Instant::now() - Duration::from_millis(1));
+        app.clear_expired_loading(Instant::now());
+        assert!(!app.pi_tokens_scanning);
+    }
+
+    #[test]
+    fn color_utf8_y_estados_tienen_fallbacks_deterministas() {
+        assert!(!should_use_color_for(None, Some("1"), Some("xterm")));
+        assert!(!should_use_color_for(None, None, Some("dumb")));
+        assert!(should_use_color_for(Some("1"), Some("1"), Some("dumb")));
+        assert!(should_use_color_for(None, Some("0"), Some("xterm")));
+
+        assert!(!supports_utf8_for(Some("C")));
+        assert!(!supports_utf8_for(None));
+        assert!(supports_utf8_for(Some("en_US.UTF-8")));
+        assert!(supports_utf8_for(Some("UTF8")));
+        assert_eq!(state_marker(PanelState::Ready, true), "[✓]");
+        assert_eq!(state_marker(PanelState::Partial, false), "[!]");
+        assert_eq!(state_marker(PanelState::Unavailable, true), "[✗]");
+        assert_eq!(state_marker(PanelState::Unavailable, false), "[x]");
+    }
+
+    #[test]
+    fn refresh_scheduler_coalesce_y_conserva_force_pendiente() {
+        let scheduler = RefreshScheduler::default();
+        assert!(scheduler.maybe_schedule_refresh(false));
+        assert!(!scheduler.maybe_schedule_refresh(false));
+        assert!(!scheduler.maybe_schedule_refresh(true));
+        assert_eq!(scheduler.finished(), Some(true));
+        assert!(scheduler.maybe_schedule_refresh(true));
+        assert_eq!(scheduler.finished(), None);
+    }
+
+    #[test]
+    fn ctrl_c_es_interrupcion_incluso_con_help_abierto() {
+        assert!(is_interrupt_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL
+        )));
+        assert!(!is_interrupt_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::NONE
+        )));
+    }
+
+    #[test]
+    fn terminal_restore_guard_ejecuta_drop_durante_unwind() {
+        static RESTORED: AtomicBool = AtomicBool::new(false);
+        fn restore_for_test() {
+            RESTORED.store(true, Ordering::SeqCst);
+        }
+        RESTORED.store(false, Ordering::SeqCst);
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = RestoreTerminal(restore_for_test);
+            panic!("panic simulado");
+        });
+        assert!(RESTORED.load(Ordering::SeqCst));
     }
 
     #[test]

@@ -69,10 +69,13 @@ shows a reauth notice.
 lazysubs-eye            # TUI if stdout is a tty; JSON otherwise
 lazysubs-eye tui        # explicit TUI (q quit · r refresh · o settings; auto-refresh 60s)
 lazysubs-eye install    # wire up waybar + Hyprland (idempotent, with backups)
+lazysubs-eye install --dry-run             # print the complete JSON plan, no writes
+lazysubs-eye install --sandbox /tmp/config # isolated integration test, no service reload
 lazysubs-eye uninstall  # revert the integration
 lazysubs-eye --json     # full JSON dump of the state
 lazysubs-eye --waybar   # single-line JSON for a custom waybar module
 lazysubs-eye --check    # summary + exit code: 0 ok, 1 warning, 2 critical, 3 error
+lazysubs-eye doctor     # local diagnostic checks (add --json for automation)
 lazysubs-eye --no-cache # force a fresh query
 lazysubs-eye --ttl 120  # cache validity (seconds, default 60)
 lazysubs-eye --signal 8 # RTMIN+N signal for the waybar module (install, default 11)
@@ -84,6 +87,21 @@ so waybar can poll every 60 s for free).
 
 `--check` is made for scripts and hooks, e.g. warn before starting a long
 agent session: `lazysubs-eye --check || echo "quota running low"`.
+
+## Compatibility
+
+The supported release target is **x86_64 Linux (musl)**, built and smoke-tested
+in the release workflow. aarch64 is not advertised as supported yet because it
+does not have a verified build job. The app needs a terminal; Waybar is only
+needed for bar integration, and Hyprland/Omarchy integration is optional.
+
+## Privacy and troubleshooting
+
+Credentials stay local. Provider requests go only to each provider's official
+endpoint; local history, cache and notification state are stored under the XDG
+directories with private permissions. Run `lazysubs-eye doctor` to check local
+configuration, cache creation and `notify-send`. For quota details, use
+`lazysubs-eye --check`; for a fresh provider read, add `--no-cache`.
 
 ## Configuration
 
@@ -215,6 +233,10 @@ Every touched file gets a `.bak.<epoch>` backup, everything inserted is fenced
 with `lazysubs-eye-begin`/`lazysubs-eye-end` markers, and `lazysubs-eye uninstall`
 reverts it byte for byte. Use `--signal N` if RTMIN+11 collides with another
 module.
+
+For packaging/tests, `--sandbox DIR` treats `DIR` as the XDG config root and
+never reloads host services. Combine it with `--dry-run` to inspect the JSON
+plan without modifying even the sandbox.
 
 ### Other Linux setups
 

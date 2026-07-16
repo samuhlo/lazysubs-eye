@@ -1,8 +1,8 @@
 //! Configuración opcional en `~/.config/lazysubs-eye/config.toml`.
 //!
 //! Todos los campos tienen defaults que reproducen el comportamiento sin
-//! config. Un fichero inválido nunca rompe el output: se avisa por stderr y
-//! se usan los defaults.
+//! config. Un fichero inválido se registra de forma accionable; los modos de
+//! diagnóstico lo convierten en exit 3 y el resto se degrada a defaults.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -225,7 +225,7 @@ impl Default for Icons {
     }
 }
 
-fn config_file() -> Option<PathBuf> {
+pub fn config_file() -> Option<PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
@@ -236,22 +236,55 @@ fn load() -> Config {
     let Some(path) = config_file() else {
         return Config::default();
     };
-    let Ok(text) = std::fs::read_to_string(&path) else {
-        return Config::default();
-    };
-    match toml::from_str(&text) {
-        Ok(config) => config,
-        Err(e) => {
-            eprintln!(
-                "lazysubs-eye: config inválida en {} (uso los defaults): {e}",
-                path.display()
-            );
-            Config::default()
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Config::default(),
+        Err(_) => {
+            set_load_errors(vec![
+                "E006: no se puede leer la configuración; comprueba sus permisos".into(),
+            ]);
+            return Config::default();
         }
+    };
+    let config: Config = match toml::from_str(&text) {
+        Ok(config) => config,
+        Err(_) => {
+            set_load_errors(vec![
+                "E001: la configuración TOML no se puede interpretar".into()
+            ]);
+            return Config::default();
+        }
+    };
+    let errors = validate(&config);
+    if errors.is_empty() {
+        config
+    } else {
+        set_load_errors(
+            errors
+                .iter()
+                .map(|error| format!("E002: {error}"))
+                .collect(),
+        );
+        Config::default()
     }
 }
 
 static CONFIG: RwLock<Option<Config>> = RwLock::new(None);
+static CONFIG_LOAD_ERRORS: RwLock<Vec<String>> = RwLock::new(Vec::new());
+
+fn set_load_errors(errors: Vec<String>) {
+    for error in &errors {
+        eprintln!(
+            "lazysubs-eye: {}",
+            crate::diagnostics::sanitize_error(error)
+        );
+    }
+    *CONFIG_LOAD_ERRORS.write().unwrap() = errors;
+}
+
+pub fn load_errors() -> Vec<String> {
+    CONFIG_LOAD_ERRORS.read().unwrap().clone()
+}
 
 /// Config global, cargada del fichero la primera vez y actualizable en
 /// caliente desde el panel de opciones de la TUI. En tests devuelve los
@@ -267,6 +300,53 @@ pub fn get() -> Config {
     };
     *CONFIG.write().unwrap() = Some(loaded.clone());
     loaded
+}
+
+/// Validación semántica separada del parseo: mantiene los mensajes cortos y
+/// aptos para `doctor`, sin incluir rutas ni valores sensibles.
+pub fn validate(config: &Config) -> Vec<String> {
+    let mut errors = Vec::new();
+    if config.ttl <= 0 {
+        errors.push("ttl debe ser mayor que cero".into());
+    }
+    if !(0.0..=100.0).contains(&config.warning_at) {
+        errors.push("warning_at debe estar entre 0 y 100".into());
+    }
+    if !(0.0..=100.0).contains(&config.critical_at) {
+        errors.push("critical_at debe estar entre 0 y 100".into());
+    }
+    if config.warning_at >= config.critical_at {
+        errors.push("warning_at debe ser menor que critical_at".into());
+    }
+    if config.stats.history_days < 0 {
+        errors.push("history_days no puede ser negativo (0 significa sin límite)".into());
+    }
+    for base_url in std::iter::once(config.minimax.base_url.as_deref())
+        .chain(
+            config
+                .accounts
+                .minimax
+                .iter()
+                .map(|account| account.base_url.as_deref()),
+        )
+        .flatten()
+    {
+        if !valid_http_url(base_url) {
+            errors.push("base_url debe ser una URL http(s) válida".into());
+        }
+    }
+    errors
+}
+
+fn valid_http_url(value: &str) -> bool {
+    let Some(rest) = value
+        .strip_prefix("https://")
+        .or_else(|| value.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    let host = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    !host.is_empty() && !host.chars().any(char::is_whitespace)
 }
 
 /// Sustituye la config en memoria (panel de opciones de la TUI).
@@ -454,6 +534,24 @@ mod tests {
         assert_eq!(config.critical_at, 95.0);
         assert!(config.notifications);
         assert!(config.providers.claude && config.providers.codex);
+    }
+
+    #[test]
+    fn validation_rechaza_umbral_y_ttl_incoherentes() {
+        let config = Config {
+            ttl: 0,
+            warning_at: 95.0,
+            critical_at: 80.0,
+            stats: Stats {
+                history_days: -1,
+                ..Stats::default()
+            },
+            ..Config::default()
+        };
+        let errors = validate(&config);
+        assert!(errors.iter().any(|e| e.contains("ttl")));
+        assert!(errors.iter().any(|e| e.contains("warning_at")));
+        assert!(errors.iter().any(|e| e.contains("history_days")));
     }
 
     #[test]

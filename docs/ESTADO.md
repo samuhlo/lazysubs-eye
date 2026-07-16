@@ -3,6 +3,40 @@
 Traspaso para continuar el desarrollo. Contexto completo del funcionamiento en
 [ARQUITECTURA.md](ARQUITECTURA.md).
 
+## Documentación de estabilización (2026-07-16)
+
+Esta sección registra el plan vigente de estabilización para release. Las fases de
+producto previas (Fases 1–3, E1–E3) no equivalen a release estable; fueron
+entregas incrementales verificadas en vivo pero sin gates de publicación.
+
+**Documentos maestros:**
+
+- [AUDITORIA-PREPUBLICACION.md](AUDITORIA-PREPUBLICACION.md) — auditoría
+  estática del código base. Veredicto: **apto para beta técnica tras resolver
+  hallazgos P0**. No listo para distribución estable generalista.
+- [PLAN-PUBLICACION.md](PLAN-PUBLICACION.md) — estrategia de lanzamiento
+  (beta técnica → RC → stable), workstreams, gates, matriz de pruebas y
+  definición de done.
+- [CHECKLIST-PUBLICACION.md](CHECKLIST-PUBLICACION.md) — checklist operativo
+  reutilizable con evidencia concreta para cada fase. Ver
+  [PLAN-PUBLICACION.md](PLAN-PUBLICACION.md) como plan de remediación y la
+  auditoría como línea base.
+
+**Paquetes de estabilización activos** (cada uno con design/scope/tasks/map):
+
+| Paquete | Prioridad | Descripción |
+|---------|-----------|-------------|
+| `secure-local-persistence` | P0 | Permisos 0600/0700, atomic_save seguro, symlinks, locks |
+| `safe-system-integration` | P0 | Install/uninstall transaccional, dry-run, preflight, ownership |
+| `reliable-history-ingestion` | P0/P1 | Backfill no bloqueante, estados explícitos, idempotencia |
+| `release-project-readiness` | P0/P1/P2 | Gates CI, versionado, docs, beta feedback |
+| `observable-health-diagnostics` | P0/P1 | --check semántico, doctor, errores accionables |
+| `runtime-performance` | P1 | O(E²) eliminado, providers paralelos, budgets |
+| `adaptive-tui-ux` | P1 | NO_COLOR, terminal pequeño, scroll, accesibilidad |
+
+**Estado de cada paquete:** `openspec/changes/<nombre>/tasks.md` — tareas
+numeradas sin marcar (`[ ]`) hasta que `sdd-apply` las complete.
+
 ## Resumen
 
 lazysubs-eye es un clon de CodexBar para Omarchy: muestra las cuotas de las

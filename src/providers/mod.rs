@@ -3,6 +3,10 @@ pub mod codex;
 pub mod minimax;
 
 use serde::{Deserialize, Serialize};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+const REFRESH_GLOBAL_BUDGET: Duration = Duration::from_secs(8);
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Window {
@@ -45,7 +49,7 @@ impl ProviderStatus {
             windows: vec![],
             reset_credits_available: None,
             stale_since: None,
-            error: Some(format!("{e:#}")),
+            error: Some(crate::diagnostics::sanitize_error(format!("{e:#}"))),
         }
     }
 
@@ -298,36 +302,113 @@ pub fn configured_providers() -> Vec<(String, String)> {
 
 pub fn collect_all() -> Status {
     let config = crate::config::get();
-    let mut providers = Vec::new();
-
-    if config.providers.claude {
-        for (spec, creds) in claude_targets(&config) {
-            if !claude::available_at(&creds) {
-                continue;
+    let claude_config = config.clone();
+    let codex_config = config.clone();
+    let minimax_config = config.clone();
+    let (results_tx, results_rx) = mpsc::channel();
+    let claude_tx = results_tx.clone();
+    std::thread::spawn(move || {
+        crate::diagnostics::verbose("collector iniciado: claude");
+        let mut out = Vec::new();
+        if claude_config.providers.claude {
+            for (spec, creds) in claude_targets(&claude_config) {
+                if !claude::available_at(&creds) {
+                    continue;
+                }
+                let mut ps = claude::collect(&creds)
+                    .unwrap_or_else(|e| ProviderStatus::err(&spec.id, &spec.name, claude::ICON, e));
+                apply_spec(&mut ps, &spec, "claude", &claude_config);
+                out.push(ps);
             }
-            let mut ps = claude::collect(&creds)
-                .unwrap_or_else(|e| ProviderStatus::err(&spec.id, &spec.name, claude::ICON, e));
-            apply_spec(&mut ps, &spec, "claude", &config);
-            providers.push(ps);
         }
-    }
-    if config.providers.codex {
-        for (spec, home) in codex_targets(&config) {
-            if !codex::available_at(home.as_deref()) {
-                continue;
+        let _ = claude_tx.send((0, out));
+    });
+    let codex_tx = results_tx.clone();
+    std::thread::spawn(move || {
+        crate::diagnostics::verbose("collector iniciado: codex");
+        let mut out = Vec::new();
+        if codex_config.providers.codex {
+            for (spec, home) in codex_targets(&codex_config) {
+                if !codex::available_at(home.as_deref()) {
+                    continue;
+                }
+                let mut ps = codex::collect(home.as_deref())
+                    .unwrap_or_else(|e| ProviderStatus::err(&spec.id, &spec.name, codex::ICON, e));
+                apply_spec(&mut ps, &spec, "codex", &codex_config);
+                out.push(ps);
             }
-            let mut ps = codex::collect(home.as_deref())
-                .unwrap_or_else(|e| ProviderStatus::err(&spec.id, &spec.name, codex::ICON, e));
-            apply_spec(&mut ps, &spec, "codex", &config);
-            providers.push(ps);
         }
-    }
-    if config.providers.minimax {
-        for (spec, key, base_url) in minimax_targets(&config) {
-            let mut ps = minimax::collect(&key, base_url.as_deref())
-                .unwrap_or_else(|e| ProviderStatus::err(&spec.id, &spec.name, minimax::ICON, e));
-            apply_spec(&mut ps, &spec, "minimax", &config);
-            providers.push(ps);
+        let _ = codex_tx.send((1, out));
+    });
+    std::thread::spawn(move || {
+        crate::diagnostics::verbose("collector iniciado: minimax");
+        let mut out = Vec::new();
+        if minimax_config.providers.minimax {
+            for (spec, key, base_url) in minimax_targets(&minimax_config) {
+                let mut ps = minimax::collect(&key, base_url.as_deref()).unwrap_or_else(|e| {
+                    ProviderStatus::err(&spec.id, &spec.name, minimax::ICON, e)
+                });
+                apply_spec(&mut ps, &spec, "minimax", &minimax_config);
+                out.push(ps);
+            }
+        }
+        let _ = results_tx.send((2, out));
+    });
+    let (mut batches, timed_out) = collect_until_budget(results_rx, 3, REFRESH_GLOBAL_BUDGET);
+    batches.sort_by_key(|(family, _)| *family);
+    let completed: std::collections::BTreeSet<usize> =
+        batches.iter().map(|(family, _)| *family).collect();
+    let mut providers: Vec<ProviderStatus> = batches
+        .into_iter()
+        .flat_map(|(_, providers)| providers)
+        .collect();
+    if timed_out {
+        crate::diagnostics::verbose("presupuesto global de collectors agotado");
+        if let Some(previous) = crate::cache::load_stale() {
+            for mut provider in previous.providers {
+                let family = match provider.id.split(':').next().unwrap_or_default() {
+                    "claude" => 0,
+                    "codex" => 1,
+                    "minimax" => 2,
+                    _ => continue,
+                };
+                if !completed.contains(&family) {
+                    provider.stale_since =
+                        Some(provider.stale_since.unwrap_or(previous.fetched_at));
+                    providers.push(provider);
+                }
+            }
+        }
+        for (family, enabled, id, name, icon) in [
+            (
+                0,
+                config.providers.claude,
+                "claude",
+                "Claude Code",
+                claude::ICON,
+            ),
+            (1, config.providers.codex, "codex", "Codex", codex::ICON),
+            (
+                2,
+                config.providers.minimax,
+                "minimax",
+                "MiniMax",
+                minimax::ICON,
+            ),
+        ] {
+            if enabled
+                && !completed.contains(&family)
+                && !providers
+                    .iter()
+                    .any(|provider| provider.id.split(':').next() == Some(id))
+            {
+                providers.push(ProviderStatus::err(
+                    id,
+                    name,
+                    icon,
+                    anyhow::anyhow!("timeout del collector; reintenta el refresh"),
+                ));
+            }
         }
     }
 
@@ -341,6 +422,27 @@ pub fn collect_all() -> Status {
         fetched_at: chrono::Utc::now().timestamp(),
         providers,
     }
+}
+
+fn collect_until_budget<T>(
+    receiver: mpsc::Receiver<(usize, T)>,
+    expected: usize,
+    budget: Duration,
+) -> (Vec<(usize, T)>, bool) {
+    let deadline = Instant::now() + budget;
+    let mut results = Vec::with_capacity(expected);
+    while results.len() < expected {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match receiver.recv_timeout(remaining) {
+            Ok(result) => results.push(result),
+            Err(_) => break,
+        }
+    }
+    let timed_out = results.len() < expected;
+    (results, timed_out)
 }
 
 #[cfg(test)]
@@ -545,6 +647,40 @@ mod tests {
         let status = ProviderStatus::err("codex", "Codex", "⬡", anyhow::anyhow!("falló"));
         assert!(status.error.is_some());
         assert_eq!(status.reset_credits_available, None);
+    }
+
+    #[test]
+    fn provider_errors_redact_credentials() {
+        let message =
+            crate::diagnostics::sanitize_error("request failed api_key=supersecret token=other");
+        assert!(!message.contains("supersecret"));
+        assert!(!message.contains("other"));
+        assert!(message.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn parallel_budget_retorna_rapidos_y_cancela_pendientes() {
+        let (tx, rx) = mpsc::channel();
+        let fast = tx.clone();
+        std::thread::spawn(move || fast.send((0, "rápido")).unwrap());
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            let _ = tx.send((1, "lento"));
+        });
+        let (results, timed_out) = collect_until_budget(rx, 2, Duration::from_millis(10));
+        assert!(timed_out);
+        assert_eq!(results, vec![(0, "rápido")]);
+    }
+
+    #[test]
+    fn parallel_budget_con_todos_rapidos_conserva_orden_reordenable() {
+        let (tx, rx) = mpsc::channel();
+        tx.send((2, "c")).unwrap();
+        tx.send((0, "a")).unwrap();
+        let (mut results, timed_out) = collect_until_budget(rx, 2, Duration::from_secs(1));
+        results.sort_by_key(|(index, _)| *index);
+        assert!(!timed_out);
+        assert_eq!(results, vec![(0, "a"), (2, "c")]);
     }
 
     #[test]

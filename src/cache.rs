@@ -1,6 +1,50 @@
+use crate::file_lock::{FileLock, LockMode};
 use crate::providers::Status;
+use std::fmt;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+#[derive(Debug)]
+pub enum AtomicSaveError {
+    SymlinkPolicyViolation,
+    LockNotAvailable,
+    LockTimeout,
+    #[allow(dead_code)] // Reservado para un backend que detecte pérdida del lease.
+    LockLost,
+    PermissionChangeFailed(std::io::Error),
+    Io(std::io::Error),
+}
+
+impl fmt::Display for AtomicSaveError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SymlinkPolicyViolation => {
+                write!(f, "la ruta de persistencia contiene un enlace simbólico")
+            }
+            Self::LockNotAvailable => write!(f, "otro proceso está escribiendo este estado"),
+            Self::LockTimeout => write!(f, "se agotó la espera del bloqueo de escritura"),
+            Self::LockLost => write!(f, "se perdió el bloqueo de escritura"),
+            Self::PermissionChangeFailed(_) => write!(f, "no se pudieron fijar permisos privados"),
+            Self::Io(_) => write!(f, "falló la persistencia local"),
+        }
+    }
+}
+
+impl std::error::Error for AtomicSaveError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PermissionChangeFailed(err) | Self::Io(err) => Some(err),
+            _ => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for AtomicSaveError {
+    fn from(err: std::io::Error) -> Self {
+        Self::Io(err)
+    }
+}
 
 fn cache_dir() -> PathBuf {
     let base = std::env::var("XDG_CACHE_HOME")
@@ -29,19 +73,87 @@ pub fn opencode_daily_index_file() -> PathBuf {
     cache_dir().join("opencode-daily-token-index-v1.json")
 }
 
-pub fn atomic_save(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    atomic_save_with_rename(path, bytes, &|from, to| std::fs::rename(from, to))
+/// Guarda datos sin publicar estados parciales. La política es de rechazo:
+/// ni el destino ni ninguno de sus padres puede ser un symlink. Así no se
+/// reemplaza un enlace ni se escribe fuera del árbol solicitado.
+pub fn atomic_save(path: &Path, bytes: &[u8]) -> Result<(), AtomicSaveError> {
+    atomic_save_with_rename(path, bytes, true, &|| Ok(()), &|from, to| {
+        std::fs::rename(from, to)
+    })
+}
+
+/// Escritura atómica para configuración de sistema propiedad del usuario.
+/// Conserva atomicidad y rechazo de symlinks, pero no altera sus permisos.
+pub fn atomic_save_system(path: &Path, bytes: &[u8]) -> Result<(), AtomicSaveError> {
+    atomic_save_with_rename(path, bytes, false, &|| Ok(()), &|from, to| {
+        std::fs::rename(from, to)
+    })
+}
+
+pub fn atomic_save_locked(
+    path: &Path,
+    bytes: &[u8],
+    mode: LockMode,
+    timeout: Duration,
+) -> Result<(), AtomicSaveError> {
+    let lock_path = path.with_extension(format!(
+        "{}.lock",
+        path.extension().and_then(|x| x.to_str()).unwrap_or("lock")
+    ));
+    let lock = FileLock::acquire(&lock_path, mode, timeout)?;
+    atomic_save_with_rename(path, bytes, true, &|| lock.verify(), &|from, to| {
+        std::fs::rename(from, to)
+    })
+}
+
+pub fn set_permissions_restrictive(path: &Path, is_dir: bool) -> Result<(), AtomicSaveError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            path,
+            std::fs::Permissions::from_mode(if is_dir { 0o700 } else { 0o600 }),
+        )
+        .map_err(AtomicSaveError::PermissionChangeFailed)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, is_dir);
+        Err(AtomicSaveError::PermissionChangeFailed(
+            std::io::Error::other("permisos privados no soportados en esta plataforma"),
+        ))
+    }
+}
+
+fn reject_symlinks(path: &Path) -> Result<(), AtomicSaveError> {
+    for component in path.ancestors() {
+        match std::fs::symlink_metadata(component) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(AtomicSaveError::SymlinkPolicyViolation)
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err.into()),
+        }
+    }
+    Ok(())
 }
 
 fn atomic_save_with_rename(
     path: &Path,
     bytes: &[u8],
+    private: bool,
+    before_commit: &dyn Fn() -> Result<(), AtomicSaveError>,
     rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
-) -> std::io::Result<()> {
+) -> Result<(), AtomicSaveError> {
     let dir = path
         .parent()
-        .ok_or_else(|| std::io::Error::other("missing cache directory"))?;
+        .ok_or_else(|| AtomicSaveError::Io(std::io::Error::other("missing cache directory")))?;
+    reject_symlinks(path)?;
     std::fs::create_dir_all(dir)?;
+    if private {
+        set_permissions_restrictive(dir, true)?;
+    }
     let nonce = format!(
         "{}.{}",
         std::process::id(),
@@ -49,10 +161,25 @@ fn atomic_save_with_rename(
     );
     let temp = dir.join(format!(".pi-index-{nonce}.tmp"));
     let result = (|| {
-        let mut file = std::fs::File::create(&temp)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        if private {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temp)?;
         file.write_all(bytes)?;
         file.sync_all()?;
+        if private {
+            // Falla cerrado antes de publicar si el filesystem no permite 0600.
+            set_permissions_restrictive(&temp, false)?;
+        }
+        before_commit()?;
         rename(&temp, path)?;
+        if private {
+            set_permissions_restrictive(path, false)?;
+        }
         #[cfg(unix)]
         std::fs::File::open(dir)?.sync_all()?;
         Ok(())
@@ -82,7 +209,12 @@ pub fn save(status: &Status) {
         let _ = std::fs::create_dir_all(dir);
     }
     if let Ok(raw) = serde_json::to_string(status) {
-        let _ = std::fs::write(path, raw);
+        let _ = atomic_save_locked(
+            &path,
+            raw.as_bytes(),
+            LockMode::Blocking,
+            Duration::from_millis(100),
+        );
     }
 }
 
@@ -107,6 +239,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(path);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_makes_the_file_and_directory_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let path =
+            std::env::temp_dir().join(format!("lazysubs-eye-permissions-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        let file = path.join("state.json");
+        atomic_save(&file, b"ok").unwrap();
+        assert_eq!(
+            std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_rejects_a_symlink_destination() {
+        let path =
+            std::env::temp_dir().join(format!("lazysubs-eye-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        let target = path.join("target");
+        let link = path.join("state.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(matches!(
+            atomic_save(&link, b"no"),
+            Err(AtomicSaveError::SymlinkPolicyViolation)
+        ));
+        assert!(!target.exists());
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_rejects_a_symlink_parent() {
+        let root =
+            std::env::temp_dir().join(format!("lazysubs-eye-parent-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("linked")).unwrap();
+        let result = atomic_save(&root.join("linked/state.json"), b"no");
+        assert!(matches!(
+            result,
+            Err(AtomicSaveError::SymlinkPolicyViolation)
+        ));
+        assert!(!root.join("real/state.json").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn failed_final_rename_keeps_the_previous_complete_index_readable() {
         let path = std::env::temp_dir().join(format!("lazysubs-eye-rename-{}", std::process::id()));
@@ -115,9 +302,10 @@ mod tests {
         let previous = br#"{"version":1}"#;
         atomic_save(&index, previous).unwrap();
 
-        let result = atomic_save_with_rename(&index, br#"{"version":2}"#, &|_, _| {
-            Err(std::io::Error::other("injected rename failure"))
-        });
+        let result =
+            atomic_save_with_rename(&index, br#"{"version":2}"#, true, &|| Ok(()), &|_, _| {
+                Err(std::io::Error::other("injected rename failure"))
+            });
 
         assert!(result.is_err());
         let raw = std::fs::read(&index).unwrap();
@@ -128,5 +316,27 @@ mod tests {
         );
         assert_eq!(std::fs::read_dir(&path).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn lost_lock_aborts_before_replacing_destination() {
+        let root = std::env::temp_dir().join(format!("lazysubs-lost-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let destination = root.join("status.json");
+        std::fs::write(&destination, b"old").unwrap();
+        let lock_path = root.join("status.json.lock");
+        let lock = FileLock::acquire(&lock_path, LockMode::NonBlocking, Duration::ZERO).unwrap();
+        std::fs::remove_file(&lock_path).unwrap();
+        let result = atomic_save_with_rename(
+            &destination,
+            b"new",
+            true,
+            &|| lock.verify(),
+            &|from, to| std::fs::rename(from, to),
+        );
+        assert!(matches!(result, Err(AtomicSaveError::LockLost)));
+        assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+        let _ = std::fs::remove_dir_all(root);
     }
 }

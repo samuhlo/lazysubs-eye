@@ -1,0 +1,6 @@
+- name: beta-feedback
+  color: "1d76db"
+  description: Feedback received during the public beta soak
+- name: beta-blocker
+  color: "b60205"
+  description: Blocks manual promotion from Beta to RC
