@@ -1,265 +1,310 @@
 # lazysubs-eye
 
-AI subscription quota monitor for any Linux with [waybar](https://github.com/Alexays/Waybar),
-lazygit-style — polished for [Omarchy](https://omarchy.org) but not tied to it.
-Shows the rate-limit windows (5h session, weekly…) of your AI CLIs in waybar
-and in a TUI, plus a per-model breakdown of the tokens you've burned today.
+[![CI](https://github.com/samuhlo/lazysubs-eye/actions/workflows/ci.yml/badge.svg)](https://github.com/samuhlo/lazysubs-eye/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/samuhlo/lazysubs-eye)](https://github.com/samuhlo/lazysubs-eye/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-```
+Monitor de cuotas y consumo de suscripciones de IA para Linux. Reúne las
+ventanas de uso de **Claude Code**, **Codex** y **MiniMax** en Waybar y en una
+TUI estilo lazygit, y conserva el historial local de tokens de Claude, Pi y
+OpenCode.
+
+Está especialmente pulido para [Omarchy](https://omarchy.org), pero no depende
+de él: la TUI funciona en cualquier terminal y la integración automática se
+adapta a instalaciones genéricas de Waybar y Hyprland.
+
+```text
  lazysubs-eye · cuotas de IA
 ╭ ✳ Claude Code ─ pro ──────────────────────────────────────────────────────────╮
-│ 5h                73% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   → 3h06m │
-│ semana            36% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   → 5d21h │
-│ semana · Fable    59% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   → 5d21h │
+│ [✓] 5h             73% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━      → 3h06m │
+│ [✓] semana         36% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━      → 5d21h │
 ╰───────────────────────────────────────────────────────────────────────────────╯
 ╭ ⬡ Codex ─ plus ───────────────────────────────────────────────────────────────╮
-│ semana            80% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━   → 5d23h │
-│ Créditos de reinicio disponibles: 4                                           │
+│ [!] semana         80% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━      → 5d23h │
+│ Créditos de reinicio disponibles: 4                                          │
 ╰───────────────────────────────────────────────────────────────────────────────╯
-╭ ✳ tokens hoy ─────────────────────────────────────────────────────────────────╮
-│ modelo                            req    in       out      cache→   cache+    │
-│ claude-fable-5                    34     17.7k    30.2k    777.9k   158.7k    │
+╭ ✳ tokens Claude · hoy ────────────────────────────────────────────────────────╮
+│ modelo                         in       out      cache→   cache+       total  │
+│ claude-fable-5                 17.7k    30.2k    777.9k   158.7k      984.5k  │
 ╰───────────────────────────────────────────────────────────────────────────────╯
- q salir  r refrescar                                                  hace 59s
+ q salir  r refrescar  o opciones  j/k scroll                         hace 59s
 ```
 
-The TUI only uses ANSI colors, so it inherits your terminal theme (and thus
-the active Omarchy theme) with zero configuration.
+## Qué ofrece
 
-## Providers
+- Cuotas en vivo, tiempo hasta el reset, plan y cuenta de cada provider.
+- Salida JSON estable para Waybar, scripts y automatizaciones.
+- TUI adaptable con scroll, ayuda, ajustes en vivo y fallbacks sin color/UTF-8.
+- Tokens por modelo de Claude, Pi y OpenCode para hoy, semana o mes.
+- Historial SQLite, sparklines y gráfica combinada semanal, mensual o por hora.
+- Multi-cuenta por provider con orden y visibilidad independientes por superficie.
+- Notificaciones de escritorio al cruzar umbrales, con cooldown y escalado.
+- Caché rápida y degradación a datos anteriores ante fallos transitorios.
+- Diagnósticos accionables mediante `--check`, `doctor` y `--verbose`.
+- Persistencia privada y atómica, locks multiproceso y backups con rollback.
+- Instalación idempotente en Waybar/Hyprland, con dry-run y sandbox.
 
-| Provider | Data source | Requirement |
+Todo el procesamiento del historial se hace en local. Solo se consulta la API
+oficial de cada provider con las credenciales que ya utiliza su CLI.
+
+## Inicio rápido
+
+### 1. Instalar
+
+La versión estable para **Linux x86_64** está en
+[GitHub Releases](https://github.com/samuhlo/lazysubs-eye/releases/latest) como
+binario estático MUSL, acompañado de su SHA-256.
+
+También puedes compilar desde el repositorio:
+
+```bash
+git clone https://github.com/samuhlo/lazysubs-eye.git
+cd lazysubs-eye
+cargo install --path . --locked
+```
+
+El repositorio incluye además un [`PKGBUILD`](packaging/aur/PKGBUILD) para
+empaquetado Arch Linux.
+
+### 2. Comprobar el entorno
+
+```bash
+lazysubs-eye --version
+lazysubs-eye doctor
+```
+
+Claude y Codex se autodetectan a partir de sus sesiones existentes. Para
+MiniMax, define `MINIMAX_API_KEY` o configura `[minimax].api_key`.
+
+### 3. Abrir la TUI
+
+```bash
+lazysubs-eye tui
+```
+
+### 4. Integrar Waybar
+
+Inspecciona primero el plan y aplícalo cuando estés conforme:
+
+```bash
+lazysubs-eye install --dry-run
+lazysubs-eye install
+```
+
+La instalación localiza el binario real, modifica únicamente los archivos
+necesarios, crea backups y recarga Waybar. Es segura al repetirla.
+
+## Fuentes de datos
+
+### Cuotas de suscripción
+
+| Provider | Fuente | Requisito |
 |---|---|---|
-| Claude Code | OAuth endpoint `api.anthropic.com/api/oauth/usage` with the token from `~/.claude/.credentials.json` | logged in to Claude Code |
-| Codex | JSON-RPC via `codex app-server` (`account/rateLimits/read`), including reset credits | `codex login` |
-| MiniMax | `GET /v1/token_plan/remains` (coding/token plan windows) | subscription key in `[minimax] api_key` or `MINIMAX_API_KEY` |
+| Claude Code | `api.anthropic.com/api/oauth/usage` | Sesión iniciada en Claude Code |
+| Codex | `codex app-server`, método `account/rateLimits/read` | `codex login` |
+| MiniMax | `GET /v1/token_plan/remains` | Subscription Key en config o entorno |
 
-If a fresh query fails (a stray 429, a network blip) the last good data is
-kept on screen for up to 30 minutes — marked as aged in the tooltip and the
-TUI — instead of wiping the panel with an error.
+Codex muestra también los créditos de reinicio cuando el servidor los incluye.
+lazysubs-eye no renueva tokens OAuth: cada CLI conserva esa responsabilidad.
 
-Daily token usage panels are also built from local data:
+### Consumo local de tokens
 
-| Panel | Data source |
+| Panel | Fuente local |
 |---|---|
-| Claude tokens | JSONL transcripts in `~/.claude/projects` |
-| Pi tokens | session JSONL in `~/.pi/agent/sessions` |
-| OpenCode tokens | OpenCode SQLite database in `~/.local/state/opencode` |
+| Claude tokens | `~/.claude/projects/**/*.jsonl` |
+| Pi tokens | `~/.pi/agent/sessions/**/*.jsonl` |
+| OpenCode tokens | Base SQLite bajo `~/.local/state/opencode` |
 
-Each panel can show **today, this week, or this month** — press `t` (or Tab) in
-the TUI to cycle the period. Empty panels show "sin uso hoy" instead of
-vanishing. Usage is recorded into a local SQLite history
-(`$XDG_STATE_HOME/lazysubs-eye/history.db`) so past days survive even when the
-source transcripts get pruned; the first run backfills whatever history the
-sources still hold.
+Los lectores usan cursores, fingerprints y cutoffs consistentes para evitar
+releer todo en cada refresco o contar datos añadidos a mitad de un scan.
 
-Press `g` for a braille **spend graph** (btop-style) of the combined token
-total, and `v` to cycle its three views: this week's days, this month's days,
-and today by hour. Turn the whole history off with `[stats] enabled = false`
-(see Configuration).
+## Comandos
 
-Everything runs locally: nothing is sent to third parties — only the official
-API of each provider is queried with your own credentials. lazysubs-eye **never
-refreshes OAuth tokens** (each CLI does that itself); if a token expires it
-shows a reauth notice.
-
-## Usage
-
-```
-lazysubs-eye            # TUI if stdout is a tty; JSON otherwise
-lazysubs-eye tui        # explicit TUI (q quit · r refresh · o settings; auto-refresh 60s)
-lazysubs-eye install    # wire up waybar + Hyprland (idempotent, with backups)
-lazysubs-eye install --dry-run             # print the complete JSON plan, no writes
-lazysubs-eye install --sandbox /tmp/config # isolated integration test, no service reload
-lazysubs-eye uninstall  # revert the integration
-lazysubs-eye --json     # full JSON dump of the state
-lazysubs-eye --waybar   # single-line JSON for a custom waybar module
-lazysubs-eye --check    # summary + exit code: 0 ok, 1 warning, 2 critical, 3 error
-lazysubs-eye doctor     # local diagnostic checks (add --json for automation)
-lazysubs-eye --no-cache # force a fresh query
-lazysubs-eye --ttl 120  # cache validity (seconds, default 60)
-lazysubs-eye --signal 8 # RTMIN+N signal for the waybar module (install, default 11)
-lazysubs-eye --version  # print version
+```text
+lazysubs-eye                 TUI con stdout interactivo; JSON sin TTY
+lazysubs-eye tui             abre explícitamente la TUI
+lazysubs-eye --waybar        JSON de una línea para Waybar
+lazysubs-eye --json          estado completo en JSON
+lazysubs-eye --check         resumen y exit code operativo
+lazysubs-eye doctor          comprueba configuración y dependencias
+lazysubs-eye doctor --json   diagnóstico estructurado
+lazysubs-eye --verbose       decisiones de caché/collectors en stderr
+lazysubs-eye --no-cache      fuerza una lectura fresca
+lazysubs-eye --ttl 120       cambia el TTL para esta ejecución
+lazysubs-eye install         integra Waybar y, si existe, Hyprland
+lazysubs-eye install --dry-run
+lazysubs-eye install --sandbox /tmp/lazysubs-config
+lazysubs-eye uninstall       revierte la integración propia
 ```
 
-The cache lives in `~/.cache/lazysubs-eye/status.json` (cached runs take ~5 ms,
-so waybar can poll every 60 s for free).
+`--verbose` no altera stdout, por lo que puede combinarse con `--json` o
+`--waybar` sin romper consumidores.
 
-`--check` is made for scripts and hooks, e.g. warn before starting a long
-agent session: `lazysubs-eye --check || echo "quota running low"`.
+### Exit codes de `--check`
 
-## Compatibility
+| Código | Significado |
+|---:|---|
+| `0` | Datos disponibles, frescos y sin umbrales activos |
+| `1` | Warning, datos stale o ingesta parcial |
+| `2` | Alguna ventana ha alcanzado el umbral crítico |
+| `3` | Error operativo, configuración inválida o ningún provider disponible |
 
-The supported release target is **x86_64 Linux (musl)**, built and smoke-tested
-in the release workflow. aarch64 is not advertised as supported yet because it
-does not have a verified build job. The app needs a terminal; Waybar is only
-needed for bar integration, and Hyprland/Omarchy integration is optional.
+Ejemplo para un hook previo a una sesión larga:
 
-## Privacy and troubleshooting
+```bash
+if ! lazysubs-eye --check; then
+  echo "Revisa tus cuotas antes de continuar"
+fi
+```
 
-Credentials stay local. Provider requests go only to each provider's official
-endpoint; local history, cache and notification state are stored under the XDG
-directories with private permissions. Run `lazysubs-eye doctor` to check local
-configuration, cache creation and `notify-send`. For quota details, use
-`lazysubs-eye --check`; for a fresh provider read, add `--no-cache`.
+## Controles de la TUI
 
-## Configuration
+| Tecla | Acción |
+|---|---|
+| `q`, `Esc`, `Ctrl+C` | Salir o cerrar el panel actual |
+| `r` | Refresco forzado |
+| `j` / `k`, `↓` / `↑` | Scroll o navegación |
+| `o` | Abrir ajustes |
+| `Espacio`, `Enter` | Activar/desactivar un ajuste |
+| `h` / `l`, `←` / `→` | Reducir/aumentar un valor |
+| `t`, `Tab` | Ciclar hoy → semana → mes |
+| `g` | Abrir/cerrar la gráfica de gasto |
+| `v`, `←`, `→` | Cambiar la vista de la gráfica |
+| `?` | Mostrar ayuda |
 
-Optional, at `~/.config/lazysubs-eye/config.toml`. Every field has a default;
-an invalid file never breaks the output (it warns on stderr and falls back to
-defaults):
+La interfaz recomienda un terminal de al menos 80×24. En tamaños inferiores
+muestra una pantalla compacta en vez de romper el layout. Respeta `NO_COLOR`,
+`FORCE_COLOR`, `TERM=dumb` y el locale; los estados nunca dependen solo del
+color.
+
+## Configuración
+
+El archivo es opcional y vive en
+`$XDG_CONFIG_HOME/lazysubs-eye/config.toml` o
+`~/.config/lazysubs-eye/config.toml`.
 
 ```toml
-ttl = 60             # cache validity in seconds (--ttl overrides)
-warning_at = 80.0    # thresholds in % — drive the waybar CSS class,
-critical_at = 95.0   # the TUI gauge colors, --check and notifications
-notifications = true # desktop notifications via notify-send (mako)
-notification_cooldown = 1800 # min seconds between repeat notifications for
-                     # the same window (escalations don't wait); 0 = off
-colors = true        # false: no threshold coloring anywhere (the waybar
-                     # `error` class stays — it signals breakage, not usage)
-show_account = true  # show the account (email/alias) next to the plan in the
-                     # TUI and the waybar tooltip; false hides it (Claude's
-                     # email is read from ~/.claude.json, identity only)
+ttl = 60
+warning_at = 80.0
+critical_at = 95.0
+notifications = true
+notification_cooldown = 1800
+colors = true
+show_account = true
 
-[providers]          # disable a provider entirely (it isn't even queried)
+[providers]
 claude = true
 codex = true
 minimax = true
 
-[waybar]             # what the bar shows — independent of the TUI
-# providers = ["claude", "minimax"]   # which ones AND their order
-# percent = false                     # icons only
+[waybar]
+providers = ["claude", "codex"]
+percent = true
 
-# [waybar.window]    # which window each provider shows (by label); default is
-# claude = "semana"  # the most urgent one. Exact match, else substring —
-# codex = "semana"   # e.g. "Fable" -> "semana · Fable". Drives text and color.
-                     # Also selectable live in the `o` panel (no file editing).
+[waybar.window]
+claude = "semana"
+codex = "semana"
 
-[tui]                # what the TUI shows
-# providers = ["minimax", "claude", "codex"]
-# panels = ["claude_tokens", "pi_tokens", "opencode_tokens"]
+[tui]
+providers = ["claude", "codex", "minimax"]
+panels = ["claude_tokens", "pi_tokens", "opencode_tokens"]
 
-[stats]              # per-day spend history (SQLite in $XDG_STATE_HOME)
-enabled = true       # false: no DB, no history panels (today-only, as before)
-default_period = "hoy" # initial panel period: hoy | semana | mes
-history_days = 90    # retention in days; 0 = keep everything
-sparkline = true     # daily-total sparkline under each token panel
+[stats]
+enabled = true
+default_period = "hoy" # hoy | semana | mes
+history_days = 90      # 0 conserva todo
+sparkline = true
 
-[icons]              # override the waybar/TUI icons
+[icons]
 claude = "✳"
 codex = "⬡"
 minimax = "◆"
 
-[minimax]            # MiniMax needs its token-plan Subscription Key
-api_key = "..."      # or the MINIMAX_API_KEY env var
-# base_url = "https://api.minimaxi.com"  # alternate host (e.g. China)
+[minimax]
+api_key = "..." # o MINIMAX_API_KEY
+# base_url = "https://api.minimaxi.com"
 ```
 
-`[waybar] providers` and `[tui] providers` control both visibility and order,
-per surface — e.g. keep the bar minimal with one provider while the TUI shows
-everything. Hidden providers don't drive the bar's CSS class either. `[tui]
-panels` toggles the daily-token panels (disabled panels aren't even scanned).
+Los ajustes guardados desde la TUI conservan comentarios y claves que el panel
+no administra. Una configuración inválida se informa en diagnóstico y produce
+exit `3` en `--check`; los modos de presentación se degradan a defaults seguros.
 
-### Multiple accounts
+### Varias cuentas
 
-By default each provider is a single auto-detected account. To watch more than
-one account of the same AI (e.g. two Claude logins), declare them under
-`[[accounts.<provider>]]`:
+Sin bloques `accounts`, cada provider usa su cuenta autodetectada. Para añadir
+más cuentas:
 
 ```toml
 [[accounts.claude]]
-name = "personal"                            # first/only account keeps id "claude"
+name = "personal"
+
 [[accounts.claude]]
-name = "work"                                # becomes id "claude:work"
-credentials = "~/work/.claude/.credentials.json"
-icon = "❄"                                   # optional per-account icon
+name = "trabajo"
+credentials = "~/trabajo/.claude/.credentials.json"
+icon = "❄"
 
 [[accounts.codex]]
 name = "personal"
-codex_home = "~/.codex"                       # passed as CODEX_HOME to the app-server
+codex_home = "~/.codex"
 
 [[accounts.minimax]]
 name = "personal"
-api_key = "..."                               # per-account key (or use [minimax] for one)
+api_key = "..."
 ```
 
-Each account becomes its own provider with a composite id (`claude:work`) and a
-name like `Claude Code · work`. The first/only account keeps the plain id
-(`claude`) so existing `providers` lists and notification state keep working;
-those lists accept composite ids too. Without any `[[accounts.*]]` the behaviour
-is unchanged. The account rows in the `o` panel (waybar/tui visibility) are built
-from your configured accounts.
+Las cuentas adicionales reciben ids como `claude:trabajo`. Estos ids se pueden
+usar en las listas `waybar.providers` y `tui.providers` para controlar orden y
+visibilidad por separado.
 
-### In-TUI settings
+## Historial y rendimiento
 
-Press `o` in the TUI to edit everything above interactively: arrow keys to
-move, space to toggle, `←`/`→` to adjust thresholds, TTL and the history
-settings. Changes apply live (the bar picks them up on its next poll) and are
-written back to `config.toml` preserving your comments and any keys the panel
-doesn't manage (like the MiniMax `api_key`). `t` (or Tab) cycles the token
-panels through today / this week / this month.
+El primer arranque reconstruye en segundo plano los días que aún existan en las
+fuentes. La TUI sigue siendo interactiva, muestra el progreso y puede cerrarse
+sin perder días ya confirmados. La próxima ejecución continúa desde el último
+día contiguo.
 
-### Notifications
+La ingesta de cada fuente y día es transaccional. Un fallo no reemplaza datos
+buenos anteriores, y los estados `Partial` y `Failed` quedan visibles para la
+TUI y `--check`.
 
-On every fresh query (waybar polls each minute) lazysubs-eye compares each
-rate-limit window against the thresholds and sends a desktop notification via
-`notify-send` when a window *crosses* into warning (normal urgency) or
-critical (critical urgency). It only notifies on level changes — state is kept
-in `~/.cache/lazysubs-eye/notify-state.json`, re-arming when the window resets
-or drops back below the threshold — so it never spams. Re-notifications of the
-same level (rolling reset windows, dipping below and crossing again) also wait
-`notification_cooldown` seconds (default 30 min); escalating to a higher level
-never waits.
+El runtime está diseñado para el polling frecuente de Waybar:
 
-## Installation
+- La caché válida evita llamadas de red; el camino habitual tarda unos pocos ms.
+- Las familias de providers se consultan en paralelo con un budget global.
+- Los refreshes solapados se agrupan en vez de crear workers duplicados.
+- Pi procesa únicamente el sufijo nuevo de cada archivo estable.
+- SQLite se recorre en lotes acotados para no cargar historiales enteros en RAM.
 
-From source (requires Rust; an AUR package — `lazysubs-eye-bin` — is planned,
-see `packaging/aur/PKGBUILD`):
+Los budgets documentados están en [`perf/baseline.json`](perf/baseline.json) y
+se verifican con `scripts/benchmarks/run_budgets.sh`.
 
+## Waybar e instalación segura
+
+`lazysubs-eye install`:
+
+1. Ejecuta un preflight completo antes de escribir.
+2. Añade `custom/ai-usage` a Waybar y CSS neutral al tema.
+3. Añade la regla flotante solo cuando detecta Hyprland.
+4. Delimita su contenido con marcadores propios.
+5. Crea backups `.bak.<epoch>` y hace rollback si una fase falla.
+6. Recarga Waybar únicamente después de confirmar todos los cambios.
+
+En Linux sin Omarchy busca `config.jsonc` o `config`, usa
+`xdg-terminal-exec` o un terminal conocido y omite integraciones que no
+apliquen. En Sway/river debes añadir manualmente la regla flotante equivalente.
+
+Para probar sin tocar el host:
+
+```bash
+lazysubs-eye install --sandbox /tmp/lazysubs-config --dry-run
+lazysubs-eye install --sandbox /tmp/lazysubs-config
 ```
-cargo install --path .
-```
 
-Then let lazysubs-eye wire itself into your waybar setup:
+El sandbox se trata como raíz XDG aislada y nunca recarga servicios reales.
 
-```
-lazysubs-eye install
-```
+### Integración manual
 
-This inserts the waybar module (first in `modules-right`), theme-neutral CSS
-and — on Hyprland — the windowrule for the floating TUI, then reloads waybar.
-Every touched file gets a `.bak.<epoch>` backup, everything inserted is fenced
-with `lazysubs-eye-begin`/`lazysubs-eye-end` markers, and `lazysubs-eye uninstall`
-reverts it byte for byte. Use `--signal N` if RTMIN+11 collides with another
-module.
-
-For packaging/tests, `--sandbox DIR` treats `DIR` as the XDG config root and
-never reloads host services. Combine it with `--dry-run` to inspect the JSON
-plan without modifying even the sandbox.
-
-### Other Linux setups
-
-Omarchy is the premium target, not a requirement — `install` degrades
-gracefully anywhere waybar runs. When Omarchy isn't detected (no
-`~/.local/share/omarchy` and no `omarchy` on `PATH`) it:
-
-- finds the waybar config as either `config.jsonc` or plain `config`;
-- writes neutral hex colors for the `error` class instead of Omarchy's
-  `alpha(@foreground, …)` (which the theme import defines);
-- picks the left-click launcher from `xdg-terminal-exec` (freedesktop) or the
-  first of `foot`/`alacritty`/`kitty`/`ghostty` found — install it if the
-  module has no `on-click`;
-- reloads with `pkill -SIGUSR2 waybar`, falling back to
-  `systemctl --user try-restart waybar.service`;
-- adds the floating window rule only if `~/.config/hypr/hyprland.conf` exists.
-
-On sway/river the float rule is skipped; add the equivalent for your compositor
-by hand (e.g. sway: `for_window [app_id="org.omarchy.lazysubs-eye"] floating enable`).
-
-## Waybar integration (manual)
-
-What `lazysubs-eye install` sets up, if you prefer to do it by hand:
+Si prefieres configurar Waybar a mano:
 
 ```jsonc
 "custom/ai-usage": {
@@ -267,59 +312,86 @@ What `lazysubs-eye install` sets up, if you prefer to do it by hand:
   "return-type": "json",
   "interval": 60,
   "signal": 11,
-  "on-click": "omarchy-launch-or-focus-tui lazysubs-eye",
+  "on-click": "xdg-terminal-exec lazysubs-eye tui",
   "on-click-right": "$HOME/.local/bin/lazysubs-eye --no-cache --waybar >/dev/null && pkill -RTMIN+11 waybar"
 }
 ```
 
-(Outside Omarchy, set `on-click` to a terminal command instead, e.g.
-`xdg-terminal-exec lazysubs-eye` or `alacritty -e lazysubs-eye`.)
+Clases CSS emitidas: `normal`, `warning`, `critical` y `error`.
 
-Emitted CSS classes: `normal`, `warning` (≥80 %), `critical` (≥95 %), `error`.
-Manual refresh from any script: `pkill -RTMIN+11 waybar`.
-Left click opens (or focuses) the TUI in a floating terminal. On Hyprland that
-needs this rule in `~/.config/hypr/hyprland.conf` so the window floats centered:
+## Privacidad y seguridad local
 
+- Las credenciales no se escriben en cachés, índices ni logs.
+- Los errores se sanean antes de mostrarse o persistirse.
+- Archivos privados: modo `0600`; directorios privados: `0700`.
+- Las escrituras usan temp privado, `fsync`, rename atómico y sync del directorio.
+- Se rechazan destinos y padres symlink para evitar redirecciones inesperadas.
+- `flock` coordina escritores y se verifica el inode antes del commit.
+- La base de historial se crea privada antes de abrir SQLite.
+
+Los datos viven en rutas XDG:
+
+| Contenido | Ruta |
+|---|---|
+| Configuración | `$XDG_CONFIG_HOME/lazysubs-eye/config.toml` |
+| Caché de providers | `$XDG_CACHE_HOME/lazysubs-eye/status.json` |
+| Estado de notificaciones | `$XDG_CACHE_HOME/lazysubs-eye/notify-state.json` |
+| Último error saneado | `$XDG_CACHE_HOME/lazysubs-eye/last-error.json` |
+| Historial | `$XDG_STATE_HOME/lazysubs-eye/history.db` |
+
+Sin variables XDG se utilizan los equivalentes bajo `~/.config`, `~/.cache` y
+`~/.local/state`.
+
+## Diagnóstico
+
+Empieza por:
+
+```bash
+lazysubs-eye doctor
+lazysubs-eye --check
+lazysubs-eye --verbose --no-cache --json >/tmp/lazysubs-status.json
 ```
-windowrule = tag +floating-window, match:class org.omarchy.lazysubs-eye
+
+`doctor` revisa configuración, providers, rutas, permisos, binario, base de
+historial, índices incrementales, `notify-send` y el último error registrado.
+Sus mensajes usan códigos estables `E001`–`E008` y evitan rutas privadas,
+credenciales, URLs sensibles y detalles internos de SQLite.
+
+Cuando una consulta fresca falla, lazysubs-eye conserva temporalmente el último
+estado bueno como `stale` en lugar de vaciar el panel.
+
+## Compatibilidad
+
+- Release soportado y probado: **x86_64 Linux**, binario estático MUSL.
+- Terminal: cualquier emulador con ANSI; color y UTF-8 tienen fallback.
+- Waybar: opcional; solo es necesario para la integración en la barra.
+- Hyprland/Omarchy: opcionales, con integración automática cuando existen.
+- aarch64: todavía no se anuncia como soportado al no tener un job verificado.
+
+## Desarrollo
+
+Requiere Rust estable:
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --locked
+scripts/check-release-readiness.sh
+scripts/benchmarks/run_budgets.sh
 ```
 
-## Documentation
+La CI exige todos los gates anteriores. Los tags construyen el artefacto MUSL,
+ejecutan audit RustSec, comprueban la versión, pasan smoke tests sobre el binario
+final y publican tarball + SHA-256.
 
-Internal docs are in Spanish:
+Consulta también:
 
-- [docs/ARQUITECTURA.md](docs/ARQUITECTURA.md) — how it works: structure, data sources, cache, TUI and system integration.
-- [docs/ESTADO.md](docs/ESTADO.md) — project state, decisions taken and pending work.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — flujo y criterios para pull requests.
+- [`SECURITY.md`](SECURITY.md) — reporte responsable de vulnerabilidades.
+- [`CHANGELOG.md`](CHANGELOG.md) — cambios por versión.
+- [`docs/ARQUITECTURA.md`](docs/ARQUITECTURA.md) — arquitectura y fuentes.
+- [`docs/ESTADO.md`](docs/ESTADO.md) — estado y decisiones del proyecto.
 
-## Roadmap
+## Licencia
 
-- [x] Phase 1 — core collector + `--json` / `--waybar` outputs
-- [x] Phase 2 — waybar integration + floating window on Hyprland
-- [x] Phase 3 — TUI (ratatui) with terminal theming + today's tokens per model
-- [x] Codex reset credits · daily tokens for Pi and OpenCode
-- [x] `lazysubs-eye install` / `uninstall` (one-command waybar + Hyprland setup)
-- [x] CI + release binaries (static musl) + AUR PKGBUILD
-- [x] Config file, threshold notifications (mako), `--check` for scripts
-- [x] MiniMax provider · graceful degradation on transient API errors
-- [x] In-TUI settings panel · notification cooldown
-- [ ] Weekly/monthly usage history + stats (SQLite)
-- [ ] Account display + multi-account per provider
-- [ ] Any Linux with waybar (Omarchy-first)
-
-## Contributing
-
-Contributions are very welcome — this project gets better the more AI
-subscriptions it covers, and everyone's stack is different. If your provider
-isn't supported, adding it is deliberately small: a provider is one module in
-`src/providers/` implementing `available()` (is it configured?) and
-`collect()` (fetch quota windows), plus a couple of lines to register it in
-`src/providers/mod.rs` and `src/config.rs`. See `src/providers/minimax.rs`
-for a compact example with tests. Notifications, `--check`, waybar classes
-and graceful degradation then work for your provider for free.
-
-Bug reports, UI ideas and docs fixes are just as appreciated — open an issue
-or a PR.
-
-## License
-
-[MIT](LICENSE)
+[MIT](LICENSE) © Samuel López (`samuhlo`).
