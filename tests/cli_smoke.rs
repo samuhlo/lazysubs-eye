@@ -37,6 +37,7 @@ fn verbose_is_stderr_only_and_missing_notify_is_a_warning_not_exit_four() {
         ),
     )
     .unwrap();
+    // [FLOW] JSON remains machine-readable on stdout while verbose refresh diagnostics stay on stderr.
     let verbose = Command::new(binary())
         .args(["--verbose", "--json"])
         .env("XDG_CACHE_HOME", root.join("cache"))
@@ -51,6 +52,7 @@ fn verbose_is_stderr_only_and_missing_notify_is_a_warning_not_exit_four() {
     assert!(stderr.contains("decisión de refresh"));
     assert!(stderr.contains("checkpoint de caché"));
 
+    // [FLOW] Missing optional notification tooling degrades doctor to a warning, never an internal-error exit.
     let doctor = Command::new(binary())
         .args(["doctor", "--json"])
         .env("PATH", "")

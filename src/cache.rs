@@ -10,7 +10,7 @@ pub enum AtomicSaveError {
     SymlinkPolicyViolation,
     LockNotAvailable,
     LockTimeout,
-    #[allow(dead_code)] // Reservado para un backend que detecte pérdida del lease.
+    #[allow(dead_code)] // [NOTE] Reserved for a lock backend that can detect lease loss.
     LockLost,
     PermissionChangeFailed(std::io::Error),
     Io(std::io::Error),
@@ -55,8 +55,10 @@ fn cache_dir() -> PathBuf {
     base.join("lazysubs-eye")
 }
 
-/// Directorio de cache compartido (status, índices de tokens, estado de
-/// notificaciones).
+/// [CACHE] SHARED STATE DIRECTORY
+///
+/// Holds status snapshots, token indexes, and notification state so separate
+/// commands observe the same local view.
 pub fn dir() -> PathBuf {
     cache_dir()
 }
@@ -73,23 +75,32 @@ pub fn opencode_daily_index_file() -> PathBuf {
     cache_dir().join("opencode-daily-token-index-v1.json")
 }
 
-/// Guarda datos sin publicar estados parciales. La política es de rechazo:
-/// ni el destino ni ninguno de sus padres puede ser un symlink. Así no se
-/// reemplaza un enlace ni se escribe fuera del árbol solicitado.
+/// [CACHE] ATOMIC PUBLISH
+///
+/// Writes and flushes a sibling temporary file, then renames it over the target.
+/// WHY: readers see either the old complete document or the new complete document.
+/// INVARIANT: the destination and every existing ancestor must not be symlinks.
 pub fn atomic_save(path: &Path, bytes: &[u8]) -> Result<(), AtomicSaveError> {
     atomic_save_with_rename(path, bytes, true, &|| Ok(()), &|from, to| {
         std::fs::rename(from, to)
     })
 }
 
-/// Escritura atómica para configuración de sistema propiedad del usuario.
-/// Conserva atomicidad y rechazo de symlinks, pero no altera sus permisos.
+/// [CACHE] ATOMIC SYSTEM CONFIG PUBLISH
+///
+/// Keeps the rename and symlink protections but preserves permissions owned by
+/// the surrounding desktop configuration.
 pub fn atomic_save_system(path: &Path, bytes: &[u8]) -> Result<(), AtomicSaveError> {
     atomic_save_with_rename(path, bytes, false, &|| Ok(()), &|from, to| {
         std::fs::rename(from, to)
     })
 }
 
+/// [CACHE] LOCKED ATOMIC PUBLISH
+///
+/// Acquires the sibling lock before preparing the replacement, then verifies the
+/// lock identity immediately before rename. WHY: a replaced lock file cannot
+/// silently let two writers publish competing snapshots.
 pub fn atomic_save_locked(
     path: &Path,
     bytes: &[u8],
@@ -125,6 +136,11 @@ pub fn set_permissions_restrictive(path: &Path, is_dir: bool) -> Result<(), Atom
     }
 }
 
+/// [CORE] SYMLINK BOUNDARY
+///
+/// Walks every existing ancestor with `symlink_metadata`, which inspects the
+/// link itself rather than its target. FAIL CLOSED -> persistence never escapes
+/// the requested tree through a substituted path.
 fn reject_symlinks(path: &Path) -> Result<(), AtomicSaveError> {
     for component in path.ancestors() {
         match std::fs::symlink_metadata(component) {
@@ -139,6 +155,11 @@ fn reject_symlinks(path: &Path) -> Result<(), AtomicSaveError> {
     Ok(())
 }
 
+/// [CACHE] DURABLE REPLACEMENT PROTOCOL
+///
+/// Creates a unique sibling file, writes and syncs its bytes, verifies the
+/// pre-commit boundary, then renames it into place and syncs the directory.
+/// FAILURE MODE: any step removes the temporary file and preserves the old target.
 fn atomic_save_with_rename(
     path: &Path,
     bytes: &[u8],
@@ -172,7 +193,7 @@ fn atomic_save_with_rename(
         file.write_all(bytes)?;
         file.sync_all()?;
         if private {
-            // Falla cerrado antes de publicar si el filesystem no permite 0600.
+            // FAIL CLOSED -> do not publish private state when the filesystem rejects 0600.
             set_permissions_restrictive(&temp, false)?;
         }
         before_commit()?;
@@ -196,8 +217,10 @@ pub fn load(ttl_secs: i64) -> Option<Status> {
     (age >= 0 && age < ttl_secs).then_some(status)
 }
 
-/// Último estado guardado, aunque el TTL haya expirado. Para degradar con
-/// datos previos cuando un provider falla (p. ej. 429).
+/// [CACHE] STALE FALLBACK
+///
+/// Returns the last snapshot even after its TTL expires, allowing callers to
+/// degrade with known data when a provider fails, such as with HTTP 429.
 pub fn load_stale() -> Option<Status> {
     let raw = std::fs::read_to_string(cache_file()).ok()?;
     serde_json::from_str(&raw).ok()

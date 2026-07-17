@@ -46,8 +46,9 @@ struct Usage {
     cache_creation_input_tokens: u64,
 }
 
-/// Tokens de hoy por modelo, agregados de los JSONL de `~/.claude/projects`.
-/// Solo abre ficheros modificados hoy; el filtro fino es el timestamp de cada entrada.
+/// [DATA] Today's tokens by model from `~/.claude/projects` JSONL.
+/// First filter by file mtime, then by entry timestamp; this avoids stale files
+/// without trusting mtime as the final date boundary.
 pub fn claude_today() -> Vec<ModelTokens> {
     let home = std::env::var("HOME").unwrap_or_default();
     let projects = PathBuf::from(home).join(".claude/projects");
@@ -108,7 +109,7 @@ pub fn claude_today() -> Vec<ModelTokens> {
                     continue;
                 };
                 if model.starts_with('<') {
-                    continue; // p.ej. "<synthetic>"
+                    continue; // Synthetic placeholders such as `<synthetic>` are not billable models.
                 }
                 let agg = by_model
                     .entry(model.clone())
@@ -130,9 +131,9 @@ pub fn claude_today() -> Vec<ModelTokens> {
     models
 }
 
-/// Tokens por modelo agrupados por día local, de todos los JSONL de Claude
-/// (sin filtro de mtime ni índice incremental). Para el backfill del historial
-/// la primera vez; es un escaneo completo one-shot.
+/// [DATA] Claude tokens by model and local day from every JSONL.
+/// Backfill deliberately skips mtime filtering and the incremental index: it is
+/// a one-shot full scan.
 pub fn claude_by_day() -> Vec<(String, Vec<ModelTokens>)> {
     let home = std::env::var("HOME").unwrap_or_default();
     let projects = PathBuf::from(home).join(".claude/projects");
@@ -202,8 +203,8 @@ pub fn claude_by_day() -> Vec<(String, Vec<ModelTokens>)> {
         .collect()
 }
 
-/// Total de tokens de Claude por hora local de HOY (24 buckets). Para la
-/// gráfica de gasto por horas; escaneo directo de los JSONL de hoy.
+/// Claude token totals for TODAY's 24 local-hour buckets. The hourly graph
+/// directly scans today's JSONL files.
 pub fn claude_today_hourly() -> [u64; 24] {
     let mut hours = [0u64; 24];
     let home = std::env::var("HOME").unwrap_or_default();

@@ -50,6 +50,8 @@ fn run(root: &std::path::Path) -> std::process::Output {
 
 #[test]
 fn check_contract_covers_only_zero_to_three() {
+    // [FLOW] Exercise the public --check exit-code contract across every supported health state.
+    // INVARIANT: diagnostics must not leak configuration secrets into either output stream.
     let cases = [
         (
             "ready",

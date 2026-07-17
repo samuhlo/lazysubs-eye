@@ -2,8 +2,10 @@ use crate::config;
 use crate::providers::{ProviderStatus, Status, Window};
 use serde_json::json;
 
-/// Ventana que muestra la barra para un provider: la configurada por etiqueta
-/// en `[waybar.window]` (exacta o por subcadena) o, si no, la más urgente.
+/// [UI] WAYBAR WINDOW SELECTION
+///
+/// Prefers the configured `[waybar.window]` label, first exactly and then as a
+/// substring. Without a match, falls back to the provider's most urgent window.
 fn display_window<'a>(p: &'a ProviderStatus, config: &config::Config) -> Option<&'a Window> {
     if let Some(want) = config.waybar.window.as_ref().and_then(|m| m.get(&p.id)) {
         if let Some(w) = p
@@ -25,6 +27,10 @@ fn display_window<'a>(p: &'a ProviderStatus, config: &config::Config) -> Option<
     p.worst()
 }
 
+/// [UI] COMPACT RESET COUNTDOWN
+///
+/// Uses whole-day, hour, and minute units for narrow terminal and Waybar output.
+/// A non-positive duration becomes `ahora`, avoiding negative countdowns.
 pub fn countdown(resets_at: i64) -> String {
     let secs = resets_at - chrono::Utc::now().timestamp();
     if secs <= 0 {
@@ -40,7 +46,8 @@ pub fn countdown(resets_at: i64) -> String {
     }
 }
 
-/// Edad de un instante pasado, con el mismo formato que countdown().
+/// Formats elapsed time using the same compact units as `countdown()`.
+/// WHY: stale-data age and reset time must remain visually comparable.
 pub fn age(since: i64) -> String {
     let secs = (chrono::Utc::now().timestamp() - since).max(0);
     let (d, h, m) = (secs / 86400, (secs % 86400) / 3600, (secs % 3600) / 60);
@@ -53,6 +60,8 @@ pub fn age(since: i64) -> String {
     }
 }
 
+/// Maps usage to the CSS severity class.
+/// INVARIANT: disabled colors never suppress the separate error class.
 fn class_for(percent: f64, config: &config::Config) -> &'static str {
     if !config.colors {
         return "normal";
@@ -70,6 +79,10 @@ pub fn waybar(status: &Status) -> String {
     waybar_with(status, &config::get())
 }
 
+/// [UI] WAYBAR JSON CONTRACT
+///
+/// Builds one custom-module payload from selected providers. Provider errors win
+/// over usage severity so a broken data source cannot look healthy.
 fn waybar_with(status: &Status, config: &config::Config) -> String {
     let mut parts = Vec::new();
     let mut tooltip = Vec::new();
@@ -213,18 +226,18 @@ mod tests {
         });
         let mut config = crate::config::Config::default();
 
-        // orden invertido y con un provider oculto
+        // Reversed order with one provider hidden.
         config.waybar.providers = Some(vec!["claude".into()]);
         let out: serde_json::Value = serde_json::from_str(&waybar_with(&status, &config)).unwrap();
         assert_eq!(out["text"], "✳ 90%");
-        assert_eq!(out["class"], "warning"); // el codex al 40% oculto no cuenta
+        assert_eq!(out["class"], "warning"); // Hidden Codex at 40% does not affect the class.
 
-        // solo iconos
+        // Icons only.
         config.waybar.percent = Some(false);
         let out: serde_json::Value = serde_json::from_str(&waybar_with(&status, &config)).unwrap();
         assert_eq!(out["text"], "✳");
 
-        // sin colores de umbral: clase siempre normal (percentage se mantiene)
+        // Without threshold colors, class stays normal while percentage remains.
         config.colors = false;
         let out: serde_json::Value = serde_json::from_str(&waybar_with(&status, &config)).unwrap();
         assert_eq!(out["class"], "normal");
@@ -256,11 +269,11 @@ mod tests {
         ];
         let mut config = crate::config::Config::default();
 
-        // sin selección → worst (5h, 90%)
+        // No selection -> worst window (5h, 90%).
         let out: serde_json::Value = serde_json::from_str(&waybar_with(&status, &config)).unwrap();
         assert_eq!(out["text"], "⬡ 90%");
 
-        // etiqueta exacta "semana" (no la de Fable)
+        // Exact "semana" label, not the Fable variant.
         let mut map = std::collections::BTreeMap::new();
         map.insert("codex".to_string(), "semana".to_string());
         config.waybar.window = Some(map.clone());
@@ -271,7 +284,7 @@ mod tests {
             "la clase también sigue la ventana elegida"
         );
 
-        // subcadena "Fable" → semana · Fable (55%)
+        // Substring "Fable" -> semana · Fable (55%).
         map.insert("codex".to_string(), "Fable".to_string());
         config.waybar.window = Some(map);
         let out: serde_json::Value = serde_json::from_str(&waybar_with(&status, &config)).unwrap();

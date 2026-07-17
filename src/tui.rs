@@ -104,8 +104,8 @@ fn state_marker(state: PanelState, utf8: bool) -> &'static str {
     }
 }
 
-/// Recorta líneas en tiempo de render: un resize no deja offsets ni alturas
-/// obsoletos en el estado de la aplicación.
+/// [LAYOUT] Derives visible lines at render time.
+/// INVARIANT: terminal resizes cannot leave stale offsets or heights in App state.
 fn layout_with_scroll<'a>(area: Rect, content: &'a [Line<'a>]) -> Vec<Line<'a>> {
     layout_with_scroll_offset(area, content, 0)
 }
@@ -133,6 +133,11 @@ fn layout_with_scroll_offset<'a>(
     lines
 }
 
+/// [FLOW] TUI LIFECYCLE
+///
+/// `run` acquires the terminal once, then `App::run` owns the event/render loop.
+/// INVARIANT: `RestoreTerminal` is created immediately after init so every exit path,
+/// including `?` propagation or unwinding, returns the caller's terminal mode.
 pub fn run() -> Result<()> {
     let mut terminal = ratatui::init();
     let _restore = RestoreTerminal(ratatui::restore);
@@ -153,9 +158,9 @@ enum Update {
     PiTokens(Vec<PiUsageRow>),
     OpenCodeTokens(OpenCodePanelState),
     BackfillProgress(history::BackfillProgress),
-    /// El backfill del historial terminó; toca recargar los agregados.
+    /// [FLOW] History backfill ended; reload its derived aggregates.
     Backfilled,
-    /// Datos de la gráfica de gasto (para la vista pedida).
+    /// [DATA] Usage graph payload for the requested view.
     Graph(GraphView, GraphData),
     ClearLoading {
         source: ScanSource,
@@ -170,16 +175,21 @@ enum ScanSource {
     OpenCode,
 }
 
-/// El worker posee este guard. Tanto un retorno normal como un panic liberan
-/// el estado loading enviando un mensaje al hilo de UI.
+/// [FLOW] The worker owns this guard.
+/// INVARIANT: normal return and panic both notify the UI to clear loading state.
 struct LoadingGuard {
     source: ScanSource,
     expire_at: Instant,
     tx: mpsc::Sender<Update>,
 }
 
-/// Coalesce refreshes sin bloquear el hilo de UI. AtomicBool basta porque el
-/// dato solo expresa ownership del worker; los resultados siguen por mpsc.
+/// [FLOW] REFRESH COALESCER
+///
+/// One provider collection may be slow. The first caller owns the worker; later
+/// callers collapse into one follow-up pass instead of spawning competing scans.
+/// ORDERING: a queued forced refresh survives ordinary requests, so explicit user
+/// intent is not silently downgraded by the periodic timer.
+/// WHY: atomics only arbitrate worker ownership; payloads cross the mpsc boundary.
 #[derive(Default)]
 struct RefreshScheduler {
     active: Arc<AtomicBool>,
@@ -235,7 +245,7 @@ impl Drop for LoadingGuard {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(dead_code)] // Partial/NotConfigured se activan al integrar diagnósticos por panel.
+#[allow(dead_code)] // [NOTE] Panel diagnostics will activate Partial and NotConfigured.
 enum PanelState {
     Loading,
     Ready,
@@ -260,18 +270,22 @@ struct App {
     opencode_scanning: bool,
     scan_deadlines: [Option<Instant>; 3],
     last_refresh: Instant,
-    /// Periodo de los paneles de tokens (hoy/semana/mes).
+    /// [UI] Shared period for token panels: today, week, or month.
     period: Period,
-    /// Agregados del historial por fuente para el periodo actual.
+    /// [DATA] Per-source aggregates and ingest state for the selected period.
     history_rows: HashMap<&'static str, Vec<history::UsageRow>>,
     history_states: HashMap<&'static str, history::IngestState>,
-    /// Serie diaria (sparkline) por fuente.
+    /// [DATA] Daily series per source; rendered only when it contains usage.
     history_spark: HashMap<&'static str, Vec<u64>>,
-    /// Gráfica de gasto: abierta o no, vista actual y datos (None = cargando).
+    /// [UI] Graph modal state; None means its replacement data is still loading.
+    /// The modal changes the main layout rather than layering over it, preventing
+    /// stale token tables from consuming the graph's vertical budget.
     graph_open: bool,
     graph_view: GraphView,
     graph_data: Option<GraphData>,
-    /// Cursor del panel de opciones; None = cerrado.
+    /// [UI] Settings modal cursor; None keeps the modal closed.
+    /// Input dispatch treats this as an exclusive focus owner: global shortcuts
+    /// cannot refresh, scroll, or toggle the graph while a config row is active.
     settings_cursor: Option<usize>,
     settings_error: Option<String>,
     backfill_progress: Option<history::BackfillProgress>,
@@ -281,7 +295,7 @@ struct App {
     scroll_offset: usize,
 }
 
-/// Ítems del panel de opciones. Los índices apuntan a PROVIDERS / PANELS.
+/// [UI] Settings rows; index variants address PROVIDERS or PANELS.
 #[derive(Clone, Copy, PartialEq)]
 enum Setting {
     Section(&'static str),
@@ -317,7 +331,7 @@ const PANELS: [(&str, &str); 3] = [
 const PROVIDER_IDS: [&str; 3] = ["claude", "codex", "minimax"];
 const PANEL_IDS: [&str; 3] = ["claude_tokens", "pi_tokens", "opencode_tokens"];
 
-/// Fuente de historial de cada panel de tokens (mismo orden que PANEL_IDS).
+/// [DATA] History source for each token panel; ordering must match PANEL_IDS.
 const PANEL_SOURCES: [&str; 3] = [
     history::SOURCE_CLAUDE,
     history::SOURCE_PI,
@@ -337,8 +351,7 @@ fn settings_items() -> Vec<Setting> {
         Setting::Section("providers"),
     ];
     items.extend((0..PROVIDERS.len()).map(Setting::Provider));
-    // Las filas de visibilidad por superficie salen de las cuentas
-    // configuradas (incluye ids compuestos como "claude:trabajo").
+    // [UI] Surface visibility follows configured accounts, including compound IDs such as "claude:work".
     let surface = surface_providers().len();
     items.push(Setting::Section("waybar"));
     items.push(Setting::WaybarPercent);
@@ -356,7 +369,7 @@ fn settings_items() -> Vec<Setting> {
     items
 }
 
-/// Providers por cuenta (id, nombre) para las filas de visibilidad del panel.
+/// [UI] Account-level provider IDs and labels for visibility settings.
 fn surface_providers() -> Vec<(String, String)> {
     providers::configured_providers()
 }
@@ -458,9 +471,9 @@ impl App {
         }
     }
 
-    /// Recarga (en segundo plano) los datos de la gráfica para la vista actual.
+    /// [FLOW] Reloads graph data asynchronously for the current view.
     fn reload_graph(&mut self) {
-        self.graph_data = None; // "cargando…" hasta que llegue
+        self.graph_data = None; // HARD STOP -> never render data from the previous view while the replacement is pending.
         let view = self.graph_view;
         let tx = self.tx.clone();
         std::thread::spawn(move || {
@@ -468,8 +481,7 @@ impl App {
         });
     }
 
-    /// Recarga los agregados del historial (filas del periodo + sparkline) de
-    /// una fuente. Barato: consultas SQLite indexadas.
+    /// [DATA] Reloads one source's period rows and sparkline from indexed SQLite queries.
     fn reload_source_history(&mut self, source: &'static str) {
         if !crate::config::get().stats.enabled {
             self.history_rows.remove(source);
@@ -497,8 +509,7 @@ impl App {
         }
     }
 
-    /// Etiquetas de las ventanas de un provider (de la última consulta), para
-    /// el selector "ventana en la barra" del panel de opciones.
+    /// [UI] Uses the latest provider windows as settings choices for the bar window selector.
     fn provider_window_labels(&self, id: &str) -> Vec<String> {
         self.status
             .as_ref()
@@ -507,6 +518,10 @@ impl App {
             .unwrap_or_default()
     }
 
+    /// [UI] SETTINGS FOCUS WALK
+    ///
+    /// Section rows are labels, not actions. Skip them while wrapping so every
+    /// focused row has a valid mutation path and the modal never lands on dead input.
     fn settings_move(&mut self, delta: i64) {
         let items = settings_items();
         let Some(mut cursor) = self.settings_cursor else {
@@ -521,7 +536,12 @@ impl App {
         self.settings_cursor = Some(cursor);
     }
 
-    /// Aplica un cambio: `dir` 0 = toggle (espacio/enter), ±1 = ajustar (←/→).
+    /// [FLOW] SETTINGS → CONFIG → DERIVED STATE
+    ///
+    /// `0` toggles and `±1` adjusts. Persist only after the in-memory config is
+    /// complete; then selectively rebuild data whose interpretation changed.
+    /// FAILURE MODE: persistence errors stay in modal state, so the user sees that
+    /// a displayed choice may not survive restart without losing the live session.
     fn settings_apply(&mut self, dir: i64) {
         let items = settings_items();
         let Some(cursor) = self.settings_cursor else {
@@ -564,7 +584,7 @@ impl App {
                 let Some((id, _)) = surface.get(i).cloned() else {
                     return;
                 };
-                // Opciones: "auto" (worst) + una por ventana del provider.
+                // [UI] "auto" selects the worst window; each fetched window is an explicit override.
                 let mut options: Vec<Option<String>> = vec![None];
                 options.extend(self.provider_window_labels(&id).into_iter().map(Some));
                 let current = config
@@ -612,11 +632,11 @@ impl App {
         self.settings_error = crate::config::persist(&config)
             .err()
             .map(|e| format!("{e:#}"));
-        // Un panel recién activado necesita su escaneo; refresh barato (cache).
+        // [FLOW] A newly enabled panel needs its first scan; cached refresh avoids unnecessary provider work.
         if matches!(items[cursor], Setting::TuiPanel(_)) {
             self.refresh(false);
         }
-        // Cambios que afectan al historial: sincronizar periodo y recargar.
+        // [DATA] History-affecting settings must synchronize the selected period and derived rows.
         match items[cursor] {
             Setting::StatsPeriod => {
                 self.period = Period::parse(&config.stats.default_period);
@@ -633,8 +653,13 @@ impl App {
         }
     }
 
-    /// Lanza el backfill del historial en segundo plano (una sola vez de por
-    /// vida); al terminar avisa para recargar los agregados.
+    /// [FLOW] HISTORY BACKFILL → UPDATE → RENDER
+    ///
+    /// The worker publishes progress for the footer, then sends `Backfilled` only
+    /// after ingestion returns. `apply_update` reloads aggregates at that boundary;
+    /// rendering never queries a half-finished backfill as if it were final.
+    /// GUARD: the cancellation flag is shared because dropping `App` must not leave
+    /// a detached worker needlessly scanning local history.
     fn spawn_backfill(&mut self) {
         if self.backfill_active {
             return;
@@ -654,6 +679,13 @@ impl App {
         });
     }
 
+    /// [FLOW] REFRESH → WORKERS → CHANNEL → STATE
+    ///
+    /// Provider status, each token source, and history writes run away from the
+    /// terminal thread. `draw` observes only completed channel updates, keeping key
+    /// handling responsive even when a provider, SQLite file, or cache is slow.
+    /// ORDERING: status completion releases the scheduler; token workers have their
+    /// own loading guards because their completion order is intentionally unrelated.
     fn refresh(&mut self, force: bool) {
         if !self.refresh_scheduler.maybe_schedule_refresh(force) {
             return;
@@ -749,6 +781,11 @@ impl App {
         }
     }
 
+    /// [FLOW] WORKER RESULTS BECOME RENDERABLE STATE
+    ///
+    /// This is the sole mutation gate for background results. Each arm clears its
+    /// own scan flag, records only trustworthy usage, and rebuilds dependent history
+    /// before the next frame. Independent updates must not reset unrelated panels.
     fn apply_update(&mut self, update: Update) {
         match update {
             Update::Status(status) => {
@@ -783,8 +820,7 @@ impl App {
                     (_, state) => state,
                 };
                 self.clear_loading(ScanSource::OpenCode);
-                // Solo se ingiere cuando hay datos reales (no en fallos: eso
-                // sobrescribiría el día con cero y perdería lo ya registrado).
+                // HARD STOP -> failures must not overwrite today's recorded usage with zero.
                 if let OpenCodePanelState::Ready(rows) | OpenCodePanelState::Stale { rows, .. } =
                     &self.opencode_tokens
                 {
@@ -805,20 +841,28 @@ impl App {
             }
             Update::BackfillProgress(progress) => self.backfill_progress = Some(progress),
             Update::Graph(view, data) => {
-                // Ignora respuestas de una vista ya cambiada.
+                // [FLOW] Ignore stale async responses after the user changes the graph view.
                 if view == self.graph_view {
                     self.graph_data = Some(data);
                 }
             }
             Update::ClearLoading { source, timed_out } => {
-                // El deadline también queda disponible para diagnósticos; la
-                // recuperación es idempotente en ambos casos.
+                // [FLOW] Drop and deadline recovery are idempotent; retain timeout metadata for diagnostics.
                 let _ = timed_out;
                 self.clear_loading(source);
             }
         }
     }
 
+    /// [FLOW] POLL → DRAIN → DRAW → DISPATCH
+    ///
+    /// Every 200 ms the loop first expires abandoned scans, drains completed worker
+    /// messages, then renders one coherent snapshot. Key input mutates only `App`;
+    /// the next iteration makes that mutation visible. The short poll also drives
+    /// periodic refresh without a second timer thread.
+    /// UI PRIORITY: Ctrl-C exits first, help consumes the next key, settings owns
+    /// focus next, and only then do global commands run. This prevents a modal key
+    /// from leaking into the dashboard underneath it.
     fn run(mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         self.refresh(false);
         if crate::config::get().stats.enabled {
@@ -851,8 +895,7 @@ impl App {
                                 _ => {}
                             }
                         } else {
-                            // El banner es informativo: cualquier interacción
-                            // lo descarta; el worker puede publicar progreso nuevo.
+                            // [UI] Progress is advisory; input dismisses it, and the worker may publish a newer update.
                             self.backfill_progress = None;
                             let stats_on = crate::config::get().stats.enabled;
                             match key.code {
@@ -896,6 +939,12 @@ impl App {
         }
     }
 
+    /// [LAYOUT] FRAME ALLOCATION
+    ///
+    /// Rendering derives all rectangles from the current frame; no resize-specific
+    /// state is stored. Provider/panel sections are sliced from `scroll_offset`,
+    /// while header and footer remain anchored. A too-small terminal renders only a
+    /// safe diagnostic because tables cannot preserve their column invariants there.
     fn draw(&self, f: &mut Frame) {
         if f.area().width < 80 || f.area().height < 24 {
             f.render_widget(
@@ -924,7 +973,7 @@ impl App {
 
         let tui_config = &crate::config::get().tui;
         let providers = providers::select(&status.providers, &tui_config.providers);
-        // Con la gráfica abierta, ocupa el sitio de los paneles de tokens.
+        // [LAYOUT] The graph replaces token panels so both views do not compete for vertical space.
         let panels: Vec<usize> = if self.graph_open {
             vec![]
         } else {
@@ -942,6 +991,8 @@ impl App {
                 .iter()
                 .map(|idx| (None, Some(*idx), self.token_panel_height(*idx))),
         );
+        // [LAYOUT] Clamp persisted scroll on every frame: hidden panels and a resize
+        // can shrink `sections` between keypresses, but slicing must always be valid.
         let start = self.scroll_offset.min(sections.len().saturating_sub(1));
         let available = f.area().height.saturating_sub(2);
         let mut end = start;
@@ -951,12 +1002,12 @@ impl App {
             end += 1;
         }
         let visible = &sections[start..end];
-        let mut constraints = vec![Constraint::Length(1)]; // cabecera
+        let mut constraints = vec![Constraint::Length(1)]; // [LAYOUT] Header stays visible above the scrollable section list.
         for (_, _, height) in visible {
             constraints.push(Constraint::Length(*height));
         }
-        constraints.push(Constraint::Min(0)); // relleno (o la gráfica)
-        constraints.push(Constraint::Length(1)); // pie
+        constraints.push(Constraint::Min(0)); // [LAYOUT] Flexible remainder hosts the graph when open.
+        constraints.push(Constraint::Length(1)); // [LAYOUT] Footer stays anchored below all content.
         let areas = Layout::vertical(constraints).split(f.area());
 
         self.draw_header(f, areas[0]);
@@ -968,7 +1019,7 @@ impl App {
             }
         }
         if self.graph_open {
-            // El penúltimo área es el relleno Min(0): ahí va la gráfica.
+            // [LAYOUT] The penultimate Min(0) area is reserved for the graph.
             self.draw_graph(f, areas[areas.len() - 2]);
         }
         self.draw_footer(f, areas[areas.len() - 1], status);
@@ -1014,7 +1065,7 @@ impl App {
     }
 
     fn draw_graph(&self, f: &mut Frame, area: Rect) {
-        // Suma de las tres fuentes (Claude + Pi + OpenCode): no es solo Claude.
+        // [DATA] Graph totals combine Claude, Pi, and OpenCode rather than one source.
         let title = format!(" tokens totales · {} ", self.graph_view.label());
         let block = bordered(title).padding(Padding::horizontal(1));
         let inner = block.inner(area);
@@ -1037,6 +1088,11 @@ impl App {
         draw_graph_labels(f, labels, &data.labels);
     }
 
+    /// [UI] SETTINGS MODAL VIEWPORT
+    ///
+    /// The modal is rendered last over `Clear`, but it does not own a separate event
+    /// loop. Its cursor determines a sliding row window so a small terminal preserves
+    /// the selected control instead of silently clipping the actionable state.
     fn draw_settings(&self, f: &mut Frame) {
         let items = settings_items();
         let config = crate::config::get();
@@ -1053,7 +1109,7 @@ impl App {
         };
         f.render_widget(Clear, area);
 
-        // Ventana visible con scroll alrededor del cursor si no cabe todo.
+        // [UI] Keep the selected setting visible when the modal cannot fit every row.
         let inner_rows = (height - 2 - extra) as usize;
         let offset = cursor.saturating_sub(inner_rows.saturating_sub(1));
         let mut lines: Vec<Line> = Vec::new();
@@ -1107,14 +1163,13 @@ impl App {
         );
     }
 
-    /// Un panel de tokens se muestra si su panel está activo. Vacío ⇒ "sin uso
-    /// hoy" (los tres paneles se comportan igual, para que Pi/Claude no
-    /// desaparezcan en días sin uso).
+    /// [UI] An enabled token panel remains visible even when empty.
+    /// INVARIANT: every source shows the same "no usage today" state instead of disappearing.
     fn token_panel_shown(&self, idx: usize, tui: &crate::config::Tui) -> bool {
         tui.panel(PANEL_IDS[idx])
     }
 
-    /// Nº de filas de cuerpo (cabecera + datos, o una línea de mensaje si vacío).
+    /// [LAYOUT] Body rows include a table header or one state message.
     fn body_lines(&self, idx: usize) -> u16 {
         if self.period != Period::Today {
             let rows = self
@@ -1122,7 +1177,7 @@ impl App {
                 .get(PANEL_SOURCES[idx])
                 .map(|r| r.len())
                 .unwrap_or(0);
-            return 1 + rows.max(1) as u16; // cabecera + al menos una fila/mensaje
+            return 1 + rows.max(1) as u16; // [LAYOUT] Preserve room for either one row or the empty-state message.
         }
         match idx {
             0 if self.tokens.is_empty() => 1,
@@ -1133,12 +1188,12 @@ impl App {
                 OpenCodePanelState::Ready(rows) | OpenCodePanelState::Stale { rows, .. } => {
                     1 + rows.len() as u16
                 }
-                _ => 1, // mensaje de estado, sin cabecera
+                _ => 1, // [LAYOUT] State messages replace the table header when no rows exist.
             },
         }
     }
 
-    /// Serie del sparkline si hay datos con algún valor positivo.
+    /// [DATA] Returns a sparkline only when the series contains actual usage.
     fn panel_spark(&self, idx: usize) -> Option<&Vec<u64>> {
         self.history_spark
             .get(PANEL_SOURCES[idx])
@@ -1151,13 +1206,13 @@ impl App {
     }
 
     fn panel_title(&self, idx: usize) -> String {
-        // Doble espacio tras el ✳ porque en muchas fuentes es un glifo ancho.
+        // [LAYOUT] The extra space compensates for wide glyph rendering in many terminal fonts.
         let base = match idx {
             0 => format!("{}  Claude Code", ascii_icon("✳")),
             1 => "Pi".into(),
             _ => "OpenCode".into(),
         };
-        // Nota de datos rancios solo en el panel OpenCode de hoy.
+        // [UI] Only today's OpenCode panel exposes its stale-data reason.
         if idx == 2 && self.period == Period::Today {
             if let OpenCodePanelState::Stale { reason, .. } = &self.opencode_tokens {
                 return format!(" {base} hoy · {} ", unavailable_text(*reason));
@@ -1166,6 +1221,11 @@ impl App {
         format!(" {base} {} ", self.period.label())
     }
 
+    /// [LAYOUT] TOKEN PANEL CONTRACT
+    ///
+    /// Height calculation and body rendering must choose the same empty/table/spark
+    /// shape. Breaking that pair causes Ratatui to allocate rows the renderer does
+    /// not consume, shifting later panels and making scroll boundaries misleading.
     fn draw_token_panel(&self, f: &mut Frame, area: Rect, idx: usize) {
         let block = bordered(self.panel_title(idx)).padding(Padding::horizontal(1));
         let inner = block.inner(area);
@@ -1204,7 +1264,7 @@ impl App {
 
     fn draw_today_body(&self, f: &mut Frame, area: Rect, idx: usize) {
         let _state = self.token_panel_state(idx);
-        // Vacío hoy → mensaje (como OpenCode), para que el panel no desaparezca.
+        // [UI] Empty Claude and Pi panels show a message, matching OpenCode instead of vanishing.
         if (idx == 0 && self.tokens.is_empty()) || (idx == 1 && self.pi_tokens.is_empty()) {
             f.render_widget(
                 Paragraph::new("sin uso hoy").style(Style::new().fg(dim_color())),
@@ -1292,8 +1352,7 @@ impl App {
         }
     }
 
-    /// Tabla agregada del historial (semana/mes) para una fuente: una fila por
-    /// (provider, modelo) con totales y coste del periodo.
+    /// [DATA] Renders weekly or monthly aggregates: one row per provider/model with period totals and cost.
     fn draw_history_body(&self, f: &mut Frame, area: Rect, source: &'static str) {
         let _state = self.history_panel_state(source);
         let rows = self.history_rows.get(source);
@@ -1394,6 +1453,8 @@ impl App {
 
 impl Drop for App {
     fn drop(&mut self) {
+        // [FLOW] App teardown requests cooperative cancellation; the worker still
+        // owns its own exit timing, so no terminal shutdown path waits on disk I/O.
         self.backfill_cancelled.store(true, Ordering::Release);
     }
 }
@@ -1461,7 +1522,7 @@ fn fmt_cost(cost: f64) -> String {
     value.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
-/// Barras verticales en braille (estilo btop) de una serie de totales.
+/// [UI] Draws btop-style vertical Braille bars for a total series.
 fn draw_braille_bars(f: &mut Frame, area: Rect, values: &[u64]) {
     let n = values.len();
     if n == 0 {
@@ -1473,8 +1534,7 @@ fn draw_braille_bars(f: &mut Frame, area: Rect, values: &[u64]) {
     } else {
         Color::Reset
     };
-    // Ancho de un punto braille en unidades de x, para rellenar cada barra con
-    // columnas contiguas (barras llenas estilo btop en vez de una línea fina).
+    // [LAYOUT] One Braille-dot width fills each bucket with adjacent columns instead of a thin line.
     let dot_dx = (n as f64 / (area.width.max(1) as f64 * 2.0)).max(f64::EPSILON);
     let canvas = Canvas::default()
         .marker(symbols::Marker::Braille)
@@ -1485,7 +1545,7 @@ fn draw_braille_bars(f: &mut Frame, area: Rect, values: &[u64]) {
                 if v == 0 {
                     continue;
                 }
-                // La barra ocupa el 70% central del bucket.
+                // [LAYOUT] Leave bucket edges empty to preserve separation between bars.
                 let mut x = i as f64 + 0.15;
                 let end = i as f64 + 0.85;
                 while x <= end {
@@ -1503,8 +1563,8 @@ fn draw_braille_bars(f: &mut Frame, area: Rect, values: &[u64]) {
     f.render_widget(canvas, area);
 }
 
-/// Fila de etiquetas del eje x, centradas bajo cada barra y sin solaparse
-/// (así las vistas densas —mes, horas— muestran solo las que caben).
+/// [LAYOUT] Centers x-axis labels below bars without overlap.
+/// TRADE-OFF: dense month and hour views omit labels that do not fit.
 fn draw_graph_labels(f: &mut Frame, area: Rect, labels: &[String]) {
     let w = area.width as usize;
     let n = labels.len();
@@ -1521,7 +1581,7 @@ fn draw_graph_labels(f: &mut Frame, area: Rect, labels: &[String]) {
             for (k, ch) in label.chars().enumerate() {
                 buf[start + k] = ch;
             }
-            last_end = start + len + 1; // un espacio de separación mínimo
+            last_end = start + len + 1; // [LAYOUT] Reserve one cell so adjacent labels remain distinct.
         }
     }
     let text: String = buf.into_iter().collect();
@@ -1531,7 +1591,7 @@ fn draw_graph_labels(f: &mut Frame, area: Rect, labels: &[String]) {
     );
 }
 
-/// Recorta cuentas largas (emails) para que quepan en el título del panel.
+/// [LAYOUT] Truncates long account names so panel titles remain bounded.
 fn truncate_account(account: &str) -> String {
     const MAX: usize = 22;
     let chars: Vec<char> = account.chars().collect();
@@ -1563,8 +1623,7 @@ fn bordered<'a>(title: impl Into<std::borrow::Cow<'a, str>>) -> Block<'a> {
         ))
 }
 
-/// Etiqueta y valor pintable de un ajuste ("[x]" para toggles, el número
-/// para los ajustables con ←/→).
+/// [UI] Returns a settings label and display value: checkbox for toggles, value for arrow-adjusted rows.
 fn setting_row(item: &Setting, config: &crate::config::Config) -> (String, String) {
     let check = |on: bool| if on { "[x]" } else { "[ ]" }.to_string();
     match item {
@@ -1651,7 +1710,7 @@ fn setting_row(item: &Setting, config: &crate::config::Config) -> (String, Strin
 fn percent_color(pct: f64) -> Color {
     let config = crate::config::get();
     if !config.colors || !should_use_color() {
-        return Color::Reset; // color del terminal, sin semáforo
+        return Color::Reset; // [UI] Preserve the terminal's color when threshold coloring is disabled.
     }
     if pct >= config.critical_at {
         Color::Red
@@ -1686,7 +1745,7 @@ fn draw_provider(f: &mut Frame, area: Rect, p: &ProviderStatus) {
         bits.push(format!("datos de hace {}", crate::output::age(since)));
     }
     let plan_title = format!(" {} ", bits.join(" · "));
-    // Doble espacio tras el icono: glifos como ✳ son anchos en muchas fuentes.
+    // [LAYOUT] The extra space compensates for wide icon glyphs in many terminal fonts.
     let block = bordered(format!(" {}  {} ", ascii_icon(&p.icon), p.name))
         .title(Span::styled(plan_title, Style::new().fg(dim_color())));
     let inner = block.inner(area);

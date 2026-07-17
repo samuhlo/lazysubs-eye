@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# [CI] Release readiness is a static contract: required workflow gates and public artifacts must exist.
+# HARD STOP -> any missing grep target or empty required file fails this script immediately.
 grep -Fq 'cargo fmt --check' .github/workflows/ci.yml
 grep -Fq 'cargo clippy --all-targets -- -D warnings' .github/workflows/ci.yml
 grep -Fq 'cargo test --locked' .github/workflows/ci.yml
@@ -19,7 +21,8 @@ test -s CHANGELOG.md
 test -s .github/ISSUE_TEMPLATE/beta-feedback.md
 test -s .github/labels.yml
 
+# [FLOW] Pass Cargo.toml's version explicitly; this validates the normal release-tag path.
 bash scripts/verify-version.sh "v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
 
-# En CI de branch, GITHUB_REF_NAME no debe pisar el tag pasado por el caller.
+# [CI] Branch refs must not override an explicit caller tag; this isolates argument precedence.
 GITHUB_REF_NAME=main bash scripts/verify-version.sh "v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"

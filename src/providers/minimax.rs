@@ -1,18 +1,15 @@
-//! Collector de MiniMax (coding/token plan).
+//! [API] MiniMax coding/token-plan collector.
 //!
-//! `GET {base_url}/v1/token_plan/remains` con `Authorization: Bearer <key>`,
-//! donde la key es la **Subscription Key** del plan (no una API key normal de
-//! la plataforma). Se configura en `[minimax] api_key` del config.toml o en
-//! la variable de entorno `MINIMAX_API_KEY`.
+//! Calls `GET {base_url}/v1/token_plan/remains` with `Authorization: Bearer <key>`.
+//! The key is the plan **Subscription Key**, not a normal platform API key; it
+//! comes from `[minimax] api_key` in `config.toml` or `MINIMAX_API_KEY`.
 //!
-//! Semántica de la respuesta (verificada en vivo, no re-derivar):
-//! - `model_remains[]`: una entrada por modelo del plan (`general` = LLM,
-//!   `video`, …), cada una con ventana de intervalo (5h) y semanal.
-//! - Los tiempos (`start_time`, `end_time`, `weekly_end_time`) van en
-//!   **milisegundos** unix.
-//! - `*_remaining_percent` es cuota **restante**, no consumida: se invierte.
-//! - `*_status == 3` significa que esa ventana no forma parte del plan
-//!   contratado: se omite.
+//! Response contract (verified against the live API; do not infer it):
+//! - `model_remains[]` has one entry per plan model (`general` = LLM, `video`,
+//!   ...), each with interval (for example 5h) and weekly windows.
+//! - `start_time`, `end_time`, and `weekly_end_time` are Unix **milliseconds**.
+//! - `*_remaining_percent` is remaining quota, not used quota, so invert it.
+//! - `*_status == 3` means the window is outside the subscribed plan: omit it.
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -23,8 +20,8 @@ pub const ICON: &str = "◆";
 const DEFAULT_BASE_URL: &str = "https://api.minimax.io";
 const STATUS_NOT_IN_PLAN: i64 = 3;
 
-/// Key de la cuenta primaria (azúcar `[minimax] api_key` o `MINIMAX_API_KEY`).
-/// La multicuenta pasa la key directamente a `collect`.
+/// Primary-account key from `[minimax] api_key` or `MINIMAX_API_KEY`.
+/// Multi-account configuration passes each key directly to `collect`.
 pub fn primary_api_key() -> Option<String> {
     crate::config::get()
         .minimax
@@ -73,8 +70,8 @@ fn interval_label(start_ms: Option<i64>, end_ms: Option<i64>) -> String {
     }
 }
 
-/// El modelo `general` (el del plan de coding) va sin prefijo; el resto de
-/// modelos del plan (video…) llevan el nombre para distinguirlos.
+/// The coding-plan `general` model has no prefix; other plan models (such as
+/// video) include their name so equal-duration windows remain distinguishable.
 fn window_label(model: &str, base: &str) -> String {
     if model == "general" {
         base.to_string()
@@ -171,7 +168,7 @@ pub fn collect(key: &str, base_url: Option<&str>) -> Result<ProviderStatus> {
 mod tests {
     use super::*;
 
-    // Respuesta real del endpoint (2026-07-14), valores redondeados.
+    // Live endpoint response captured on 2026-07-14; values are rounded.
     const FIXTURE: &str = r#"{
       "model_remains": [
         {
@@ -204,12 +201,12 @@ mod tests {
     fn mapea_la_respuesta_real() {
         let resp: RemainsResponse = serde_json::from_str(FIXTURE).unwrap();
         let windows = windows_from(&resp.model_remains);
-        // general: solo el intervalo 5h (la semanal es status 3 = fuera del
-        // plan); video: fuera del plan por completo.
+        // `general`: only its 5h interval; weekly status 3 is outside the plan.
+        // `video`: every window is outside the plan.
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].label, "5h");
-        assert_eq!(windows[0].used_percent, 75.0); // 100 - 25 restante
-        assert_eq!(windows[0].resets_at, Some(1_784_041_200)); // ms → s
+        assert_eq!(windows[0].used_percent, 75.0); // Used percentage = 100 - 25 remaining.
+        assert_eq!(windows[0].resets_at, Some(1_784_041_200)); // API milliseconds -> UI Unix seconds.
     }
 
     #[test]

@@ -1,8 +1,8 @@
-//! Bloqueos advisory por fichero para coordinar procesos de lazysubs-eye.
+//! [CORE] ADVISORY FILE LOCKS
 //!
-//! En Unix usamos `flock(2)`: el kernel libera el bloqueo cuando un proceso
-//! termina, incluso tras un crash. Es deliberadamente un lock por fichero,
-//! no global, para que estados independientes no se bloqueen entre sí.
+//! Unix `flock(2)` releases the lock when its process exits, including after a
+//! crash. Locks are per file rather than global, so unrelated state updates do
+//! not serialize behind each other.
 
 use crate::cache::AtomicSaveError;
 use std::fs::{File, OpenOptions};
@@ -26,6 +26,11 @@ pub struct FileLockGuard {
 }
 
 impl FileLockGuard {
+    /// [CORE] BOUNDED LOCK ACQUISITION
+    ///
+    /// Opens a private lock file and retries non-blocking `flock` every 10 ms
+    /// until the deadline. Non-blocking mode reports contention immediately.
+    /// TRADE-OFF: polling keeps a timeout possible because blocking `flock` cannot.
     fn acquire(path: &Path, mode: LockMode, timeout: Duration) -> Result<Self, AtomicSaveError> {
         let mut options = OpenOptions::new();
         options.create(true).read(true).write(true);
@@ -68,9 +73,11 @@ impl FileLockGuard {
         }
     }
 
-    /// Detecta que el lockfile fue eliminado/reemplazado mientras se escribía.
-    /// En ese caso otro proceso podría bloquear el inode nuevo, así que el
-    /// commit debe abortar aunque todavía conservemos el flock del inode viejo.
+    /// [CORE] LOCK IDENTITY CHECK
+    ///
+    /// Detects replacement or deletion of the lock file during a write. Another
+    /// process could lock the new inode while this guard still owns the old one,
+    /// so publication must abort.
     pub fn verify(&self) -> Result<(), AtomicSaveError> {
         #[cfg(unix)]
         {
@@ -86,8 +93,8 @@ impl FileLockGuard {
 
 impl Drop for FileLockGuard {
     fn drop(&mut self) {
-        // Un error aquí no puede recuperarse desde Drop; cerrar el fd también
-        // libera flock, así que este unlock solo reduce la ventana de espera.
+        // [FLOW] Drop cannot report failure; closing the fd also releases flock,
+        // so this explicit unlock only shortens a waiting process's delay.
         let _ = unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
     }
 }

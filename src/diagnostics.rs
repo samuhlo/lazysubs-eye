@@ -24,6 +24,10 @@ fn last_error_path() -> std::path::PathBuf {
     crate::cache::dir().join("last-error.json")
 }
 
+/// [DATA] LAST ERROR SNAPSHOT
+///
+/// Persists only sanitized diagnostic data. WHY: `doctor` can explain the last
+/// failure across process boundaries without retaining secrets.
 pub fn record_last_error(code: &str, message: impl AsRef<str>) {
     let event = LastError {
         code: code.to_owned(),
@@ -40,14 +44,18 @@ pub fn last_error() -> Option<LastError> {
     serde_json::from_slice(&raw).ok()
 }
 
-/// Normaliza errores antes de mostrarlos o persistirlos. Conserva la causa
-/// accionable, pero elimina credenciales, URLs privadas, saltos de línea y
-/// detalles internos de SQLite.
+/// [CORE] SAFE ERROR SURFACE
+///
+/// Preserves the actionable cause while removing credentials, private URL
+/// paths, line breaks, and SQLite internals before output or persistence.
+/// INVARIANT: diagnostic storage must never become a second secret store.
 pub fn sanitize_error(message: impl AsRef<str>) -> String {
     let mut sanitized = message.as_ref().replace(['\n', '\r'], " ");
     if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
         sanitized = sanitized.replace(&home.to_string_lossy().to_string(), "~");
     }
+    // [DATA] Redact marker values until a token boundary, then continue after
+    // the replacement so repeated secrets in one message cannot be skipped.
     for marker in [
         "api_key=",
         "api-key=",
@@ -71,6 +79,7 @@ pub fn sanitize_error(message: impl AsRef<str>) -> String {
             cursor = value_start + "[REDACTED]".len();
         }
     }
+    // [DATA] Keep URL origin for diagnosis but redact its path, query, and fragment.
     for scheme in ["https://", "http://"] {
         let mut cursor = 0;
         while let Some(relative) = sanitized[cursor..].find(scheme) {

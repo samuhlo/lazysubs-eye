@@ -45,6 +45,9 @@ pub struct PiUsageRow {
     pub totals: PiUsageTotals,
 }
 
+// [CACHE] The index belongs to one local calendar interpretation, not UTC.
+// Offset is part of the key so a zone/DST change invalidates a same-date cache
+// instead of silently assigning old entries to today's local buckets.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct DayKey {
     local_date: String,
@@ -61,6 +64,9 @@ impl DayKey {
     }
 }
 
+// [CACHE] Per-file checkpoint. `safe_offset` ends after a newline; the two
+// fingerprints prove that both the header and bytes immediately before that
+// cursor still name the same stream before suffix reuse is allowed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct FileState {
     #[serde(default)]
@@ -161,6 +167,9 @@ struct SessionHeader {
     timestamp: String,
 }
 
+// [API] Accept only complete assistant-usage messages from Pi session JSONL.
+// FAIL CLOSED -> malformed JSON, missing identity, invalid cost, or ambiguous
+// local timestamp contributes nothing; partial records must not inflate totals.
 fn parse_pi_line(line: &str) -> Option<ParsedEntry> {
     let envelope: Envelope = serde_json::from_str(line).ok()?;
     let id = envelope.id?.trim().to_owned();
@@ -237,6 +246,8 @@ fn hash(bytes: &[u8]) -> u64 {
     value
 }
 
+// [DATA] Validate every integer and float addition before mutating `target`.
+// INVARIANT -> a rejected overflow leaves the prior aggregate untouched.
 fn merge_totals(target: &mut PiUsageTotals, contribution: &PiUsageTotals) -> bool {
     let Some(input) = target.input.checked_add(contribution.input) else {
         return false;
@@ -287,6 +298,8 @@ fn group_totals(index: &DailyPiIndexV1) -> BTreeMap<(String, String), PiUsageTot
     groups
 }
 
+// [CACHE] Entry IDs deduplicate mirrored session files. Track every source path
+// so removing one file keeps the contribution while another still references it.
 fn add_entry(index: &mut DailyPiIndexV1, path: &str, entry: ParsedEntry) {
     if let Some(existing) = index.seen_entries.get_mut(&entry.id) {
         existing.source_paths.insert(path.to_owned());
@@ -328,6 +341,9 @@ fn remove_file_sources(index: &mut DailyPiIndexV1, path: &str) {
     }
 }
 
+// [CACHE] On Unix, device+inode survives a rename but changes on replacement.
+// The cache key follows the object rather than its path, so moving a live
+// session keeps its cursor while an atomic writer cannot inherit old entries.
 #[cfg(unix)]
 fn stable_file_identity(
     _path: &Path,
@@ -369,6 +385,9 @@ fn read_window(path: &Path, offset: u64, length: usize) -> std::io::Result<Vec<u
     Ok(bytes)
 }
 
+// [CACHE] Hash a bounded tail ending at the cursor. Metadata alone can lie on
+// coarse filesystems; this window detects in-place edits before appended bytes
+// are trusted. Offset zero deliberately fingerprints an empty window.
 fn cursor_window(path: &Path, offset: u64) -> std::io::Result<Vec<u8>> {
     let length = offset.min(FINGERPRINT_BYTES as u64) as usize;
     read_window(path, offset.saturating_sub(length as u64), length)
@@ -378,8 +397,8 @@ fn read_suffix(path: &Path, offset: u64, snapshot_size: u64) -> std::io::Result<
     let mut file = std::fs::File::open(path)?;
     file.seek(SeekFrom::Start(offset))?;
     let mut bytes = Vec::new();
-    // El metadata.len() capturado antes del open es el cutoff del scan. Un
-    // append concurrente queda para el siguiente refresh.
+    // The pre-open `metadata.len()` is this scan's cutoff.
+    // ORDERING -> a concurrent append is deferred to the next refresh.
     file.take(snapshot_size.saturating_sub(offset))
         .read_to_end(&mut bytes)?;
     #[cfg(test)]
@@ -387,6 +406,9 @@ fn read_suffix(path: &Path, offset: u64, snapshot_size: u64) -> std::io::Result<
     Ok(bytes)
 }
 
+// [FLOW] Incremental JSONL scan: reuse the safe cursor when file identity and
+// fingerprints match; otherwise remove this file's old contributions and rebuild.
+// A trailing partial line stays beyond `safe_offset` until a later newline closes it.
 fn process_file(index: &mut DailyPiIndexV1, path: &Path, day_key: &DayKey) {
     let metadata = match std::fs::metadata(path) {
         Ok(metadata) => metadata,
@@ -401,8 +423,8 @@ fn process_file(index: &mut DailyPiIndexV1, path: &Path, day_key: &DayKey) {
         .unwrap_or(0);
     let (key, dev, ino) = stable_file_identity(path, &metadata);
     let known = index.files.get(&key).cloned();
-    // Fast path de steady state: solo metadata(), sin abrir ni leer el JSONL.
-    // Los tres campos evitan falsos negativos ante append, reemplazo y rename.
+    // [CACHE] Steady-state fast path: inspect metadata without opening JSONL.
+    // Size, mtime, and identity together detect append, replacement, and rename.
     if known.as_ref().is_some_and(|state| {
         state.size == size
             && state.modified_ms == modified_ms
@@ -520,6 +542,9 @@ fn rows(index: &DailyPiIndexV1) -> Vec<PiUsageRow> {
     rows
 }
 
+// [CACHE] Cache JSON is an optimization, never evidence. Bad JSON, a schema
+// change, an incompatible identity format, or a different local day starts an
+// empty index and reconstructs it from source JSONL.
 fn load_index(path: &Path, day_key: &DayKey) -> DailyPiIndexV1 {
     std::fs::read_to_string(path)
         .ok()
@@ -532,6 +557,8 @@ fn load_index(path: &Path, day_key: &DayKey) -> DailyPiIndexV1 {
         .unwrap_or_else(|| DailyPiIndexV1::empty(day_key.clone()))
 }
 
+// [CACHE] Reconcile discovered files with the persisted index before scanning.
+// Missing files withdraw only their source references; shared entry IDs survive.
 fn update_pi_index(root: &Path, index_path: &Path, day_key: DayKey) -> Vec<PiUsageRow> {
     let mut index = load_index(index_path, &day_key);
     let mut paths = Vec::new();
@@ -563,6 +590,10 @@ fn update_pi_index(root: &Path, index_path: &Path, day_key: DayKey) -> Vec<PiUsa
     snapshot
 }
 
+// [FLOW] Today refresh: discover session JSONL, reconcile vanished/replaced
+// files, consume only safe suffixes, aggregate unique IDs, then atomically
+// persist the checkpoint for the next refresh. Discovery/read failures degrade
+// to an empty or previously reconstructible snapshot rather than blocking UI.
 pub fn scan_pi_today() -> Vec<PiUsageRow> {
     let Some(root) = pi_sessions_root() else {
         return vec![];
@@ -570,6 +601,9 @@ pub fn scan_pi_today() -> Vec<PiUsageRow> {
     update_pi_index(&root, &cache::pi_daily_index_file(), DayKey::now())
 }
 
+// [DATA] Backfill uses trusted parser output and aggregates once per entry ID.
+// Unlike the incremental path, this one-shot reconstruction has no persisted
+// accumulator; source counters are added directly for each historical day.
 fn add_pi_totals(acc: &mut PiUsageTotals, add: &PiUsageTotals) {
     acc.input += add.input;
     acc.output += add.output;
@@ -593,9 +627,9 @@ fn pi_sessions_root() -> Option<PathBuf> {
         })
 }
 
-/// Uso de Pi por (provider, modelo) agrupado por día local, escaneando todos
-/// los JSONL de sesiones sin índice incremental. Para el backfill del
-/// historial (una sola vez). Deduplica entradas por id entre ficheros.
+/// [DATA] Pi usage grouped by `(provider, model)` and local day by scanning all
+/// session JSONL without the incremental index. One-shot backfill deduplicates
+/// entry IDs across files.
 pub fn scan_pi_all_days() -> Vec<(String, Vec<PiUsageRow>)> {
     let Some(root) = pi_sessions_root() else {
         return vec![];
@@ -656,8 +690,12 @@ pub fn scan_pi_all_days() -> Vec<(String, Vec<PiUsageRow>)> {
         .collect()
 }
 
-/// Total de tokens de Pi por hora local de HOY (24 buckets). Para la gráfica
-/// de gasto por horas; escaneo directo, deduplicando por id de entrada.
+/// [FLOW] Pi token totals for TODAY's 24 local-hour buckets. Direct scan,
+/// deduplicating each entry ID.
+///
+/// File mtime is only a cheap candidate filter; each accepted timestamp decides
+/// the local day and `0..23` bucket. Missing roots, unreadable files, and parse
+/// failures leave their buckets at the zero sentinel.
 pub fn scan_pi_today_hourly() -> [u64; 24] {
     let mut hours = [0u64; 24];
     let Some(root) = pi_sessions_root() else {
@@ -673,8 +711,8 @@ pub fn scan_pi_today_hourly() -> [u64; 24] {
     walk(&root, &mut paths);
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for path in paths {
-        // Solo ficheros tocados hoy: el filtro fino sigue siendo el timestamp
-        // de cada entrada. Evita re-parsear todo el histórico de sesiones.
+        // Only inspect files touched today; each entry timestamp remains the precise filter.
+        // FRICTION CUT -> avoid reparsing the full session history.
         let modified_today = std::fs::metadata(&path)
             .and_then(|m| m.modified())
             .ok()

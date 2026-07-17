@@ -10,6 +10,9 @@ const INDEX_FORMAT: &str = "lazysubs-eye-opencode-daily";
 const INDEX_VERSION: u8 = 1;
 const RECONCILE_INTERVAL_MS: i64 = 24 * 60 * 60 * 1_000;
 
+// [CACHE] Probe both the high-water rowid and the ID stored at the previous
+// cursor. The pair detects a database replacement or rowid reuse before an
+// incremental scan can merge unrelated rows.
 const SQL_CURSOR_PROBE: &str = "
 SELECT COALESCE(MAX(rowid), 0),
        (SELECT id FROM part WHERE rowid = ?1)
@@ -37,9 +40,8 @@ SELECT part_rowid, part_id, provider_id, model_id, input_tokens, output_tokens,
        reasoning_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost
 FROM projected WHERE part_type = 'step-finish' AND message_role = 'assistant'";
 
-/// Como SQL_SUFFIX pero sin acotar por día ni por cursor: proyecta todas las
-/// filas step-finish con su time_created para agruparlas por día en Rust.
-/// Solo para el backfill del historial.
+/// [DATA] `SQL_SUFFIX` without day or cursor bounds: project every `step-finish`
+/// row with `time_created`, then group by local day in Rust. Backfill only.
 const SQL_ALL_DAYS: &str = "
 WITH projected AS (
   SELECT p.time_created AS time_created,
@@ -60,8 +62,9 @@ SELECT time_created, provider_id, model_id, input_tokens, output_tokens,
        reasoning_tokens, cache_read_tokens, cache_write_tokens, total_tokens, cost
 FROM projected WHERE part_type = 'step-finish' AND message_role = 'assistant'";
 
-/// Filas step-finish de una ventana temporal [?1, ?2) con su time_created y
-/// totales, para agrupar por hora. Para la gráfica de gasto por horas.
+/// [DB] `step-finish` rows in half-open `[?1, ?2)` with timestamps and totals.
+/// The hourly spend graph assigns each row to its local-hour bucket. Bounds are
+/// epoch milliseconds, not dates, so SQL cannot accidentally apply UTC days.
 const SQL_HOURLY: &str = "
 WITH projected AS (
   SELECT p.time_created AS time_created,
@@ -256,6 +259,9 @@ impl From<OpenCodeError> for OpenCodeUnavailableReason {
     }
 }
 
+// [DB] Never create or migrate the provider database. Read-only URI plus
+// `query_only` protects it from this collector; the short busy timeout turns a
+// concurrent writer into a recoverable panel state instead of a UI stall.
 fn open_read_only(path: &Path) -> Result<Connection, OpenCodeError> {
     if !path.is_file() {
         return Err(OpenCodeError::Missing);
@@ -293,6 +299,9 @@ fn map_sqlite_error(error: rusqlite::Error) -> OpenCodeError {
     }
 }
 
+// [DATA] A local day is a half-open epoch-millisecond interval. Store both
+// offsets because DST can make consecutive local midnights 23 or 25 hours
+// apart; rebuilding it from a date alone would make a cached boundary ambiguous.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct DayWindow {
     local_date: String,
@@ -324,6 +333,9 @@ impl DayWindow {
     }
 }
 
+// [CACHE] Identity mixes filesystem object, canonical path hash, schema shape,
+// SQLite versions, page size, and the ID at the watermark. No single signal
+// catches every replacement, restore, or incompatible provider upgrade.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct DbIdentity {
     platform_file_id: Option<String>,
@@ -335,6 +347,9 @@ struct DbIdentity {
     watermark_part_id: Option<String>,
 }
 
+// [CACHE] Persistent incremental-scan checkpoint.
+// INVARIANT -> identity, day window, cursor, seen IDs, and aggregates describe
+// the same SQLite snapshot; any mismatch rebuilds instead of trusting the cache.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct OpenCodeIndexV1 {
@@ -348,6 +363,8 @@ struct OpenCodeIndexV1 {
     last_full_rebuild_ms: i64,
 }
 
+// [API] The OpenCode database is private storage, not a stable public schema.
+// FAIL CLOSED -> reject missing keys or JSON support before issuing projections.
 fn validate_schema(connection: &Connection) -> Result<(), OpenCodeError> {
     for (table, required) in [
         ("message", &["id", "data"][..]),
@@ -465,6 +482,9 @@ fn cursor_probe(
         .map_err(map_sqlite_error)
 }
 
+// [DATA] SQL NULL means "provider did not report this field", distinct from
+// integer zero. Text, negative, and non-integral values are invalid external
+// formats, not coercible token counts.
 fn value_token(value: Value) -> Result<Option<u64>, OpenCodeError> {
     match value {
         Value::Null => Ok(None),
@@ -482,6 +502,10 @@ fn value_cost(value: Value) -> Result<Option<f64>, OpenCodeError> {
     }
 }
 
+// [DB] The suffix query joins `part` to its owning `message`, projects only
+// JSON scalars, and constrains rowid plus the captured local-day window. SQL
+// filters semantic eligibility; Rust validates every external JSON value before
+// aggregation, so malformed usage fails this refresh rather than becoming zero.
 fn project_step_finish_rows(
     connection: &Connection,
     after_rowid: i64,
@@ -543,6 +567,9 @@ fn project_step_finish_rows(
     .collect()
 }
 
+// [DATA] Prefer the provider-supplied total. If it is absent, derive one only
+// when at least one component exists; checked addition turns overflow into an
+// invalid-usage failure instead of silently wrapping a quota.
 fn effective_total(row: &ProjectedRow) -> Result<Option<u64>, OpenCodeError> {
     if row.total.is_some() {
         return Ok(row.total);
@@ -601,6 +628,8 @@ impl GroupTotals {
     }
 }
 
+// [DATA] Unknown is contagious during aggregation: one absent contribution
+// keeps the group absent, preventing a partial sum from masquerading as a total.
 fn sum_optional(left: Option<u64>, right: Option<u64>) -> Result<Option<u64>, OpenCodeError> {
     match (left, right) {
         (Some(left), Some(right)) => left
@@ -623,6 +652,9 @@ fn sum_cost(left: Option<f64>, right: Option<f64>) -> Result<Option<f64>, OpenCo
     }
 }
 
+// [DATA] Group by provider+model, preserving `None` when any contribution is
+// unknown. ORDERING -> sort by descending total, then provider and model, so
+// equal usage has stable display order across scans.
 fn aggregate_projected_rows(
     rows: Vec<ProjectedRow>,
 ) -> Result<Vec<OpenCodeUsageRow>, OpenCodeError> {
@@ -664,12 +696,18 @@ fn totals_to_rows(totals: &BTreeMap<String, OpenCodeUsageRow>) -> Vec<OpenCodeUs
     rows
 }
 
+// [CACHE] Keep the database cursor across midnight because old rowids cannot
+// enter the new day window. Clear IDs and totals because they are day-scoped;
+// the periodic full rebuild remains the repair path for unusual mutations.
 fn apply_day_rollover(index: &mut OpenCodeIndexV1, new_window: DayWindow) {
     index.day = new_window;
     index.seen_part_ids.clear();
     index.totals.clear();
 }
 
+// [CACHE] Version/format mismatch is a cache miss. `deny_unknown_fields` on
+// the index type also rejects future or contaminated cache payloads rather than
+// carrying an incomplete checkpoint into an incremental merge.
 fn load_index(path: &Path) -> Option<OpenCodeIndexV1> {
     serde_json::from_slice(&std::fs::read(path).ok()?)
         .ok()
@@ -701,6 +739,9 @@ fn merge_rows(
     aggregate_projected_rows(all)
 }
 
+// [FLOW] Read a bounded SQLite snapshot, validate or rebuild the index, then
+// scan only rows after its watermark. A daily rollover clears daily aggregates
+// but retains the cursor; periodic reconciliation rebuilds to catch mutations.
 fn collect_at(path: &Path, cache_path: &Path, now: DateTime<Local>) -> OpenCodePanelState {
     let mut connection = match open_read_only(path) {
         Ok(connection) => connection,
@@ -787,6 +828,8 @@ fn collect_at(path: &Path, cache_path: &Path, now: DateTime<Local>) -> OpenCodeP
     }
 }
 
+// [CACHE] Preserve prior rows only when they exist. This distinguishes stale,
+// still-useful data from an unavailable collector with nothing trustworthy.
 fn stale_or_unavailable(rows: Vec<OpenCodeUsageRow>, error: OpenCodeError) -> OpenCodePanelState {
     if rows.is_empty() {
         OpenCodePanelState::Unavailable(error.into())
@@ -798,6 +841,10 @@ fn stale_or_unavailable(rows: Vec<OpenCodeUsageRow>, error: OpenCodeError) -> Op
     }
 }
 
+/// [FLOW] Resolve the provider DB, take a bounded read-only snapshot, then
+/// return ready rows, explicit emptiness, or an unavailable/stale reason. An
+/// in-memory provider DB is intentionally rejected: it has no durable source
+/// that a separate status process can inspect.
 pub fn scan_opencode_today() -> OpenCodePanelState {
     match resolve_opencode_db(&EnvSnapshot::current()) {
         DbResolution::File(path) => {
@@ -812,9 +859,10 @@ pub fn scan_opencode_today() -> OpenCodePanelState {
     }
 }
 
-/// Uso de OpenCode por (provider, modelo) agrupado por día local, leyendo el
-/// histórico completo de la base SQLite. Para el backfill del historial (una
-/// sola vez). Best-effort: cualquier fallo devuelve lo que se pudo agregar.
+/// [FLOW] OpenCode usage grouped by `(provider, model)` and local day from the
+/// full SQLite history. One-shot backfill, ordered oldest-first by `BTreeMap`.
+/// The read transaction fixes a source snapshot; malformed individual rows are
+/// skipped, while setup/query failures return an empty plan for history to retry.
 pub fn scan_opencode_all_days() -> Vec<(String, Vec<OpenCodeUsageRow>)> {
     let path = match resolve_opencode_db(&EnvSnapshot::current()) {
         DbResolution::File(path) => path,
@@ -826,8 +874,8 @@ pub fn scan_opencode_all_days() -> Vec<(String, Vec<OpenCodeUsageRow>)> {
     if validate_schema(&connection).is_err() {
         return vec![];
     }
-    // Una transacción read-only fija la instantánea SQLite antes de recorrer
-    // las filas: entradas añadidas después pertenecen al siguiente backfill.
+    // A read-only transaction fixes the SQLite snapshot before traversal.
+    // ORDERING -> rows appended later belong to the next backfill.
     let Ok(transaction) = connection.transaction() else {
         return vec![];
     };
@@ -899,8 +947,10 @@ pub fn scan_opencode_all_days() -> Vec<(String, Vec<OpenCodeUsageRow>)> {
         .collect()
 }
 
-/// Total de tokens de OpenCode por hora local de HOY (24 buckets). Para la
-/// gráfica de gasto por horas; best-effort (ceros ante cualquier fallo).
+/// [FLOW] OpenCode token totals for TODAY's 24 local-hour buckets. Best-effort:
+/// any failure returns the all-zero sentinel for the hourly spend graph. The
+/// same local half-open day window used by incremental scanning prevents UTC
+/// midnight or DST boundaries from leaking rows into adjacent buckets.
 pub fn scan_opencode_today_hourly() -> [u64; 24] {
     let mut hours = [0u64; 24];
     let path = match resolve_opencode_db(&EnvSnapshot::current()) {

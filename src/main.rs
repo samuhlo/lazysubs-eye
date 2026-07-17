@@ -61,6 +61,8 @@ fn main() {
     let mut ttl = config::get().ttl;
     let mut signal = DEFAULT_SIGNAL;
 
+    // [FLOW] Parse left to right so `doctor --json` is a doctor-specific output
+    // modifier while standalone `--json` selects the normal machine interface.
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -157,6 +159,8 @@ fn main() {
     } else {
         "decisión de refresh: forzado por --no-cache"
     });
+    // [CACHE] A valid snapshot avoids provider I/O; a miss performs one bounded
+    // collection cycle, then persists it before notifications and history ingest.
     let cached = if use_cache { cache::load(ttl) } else { None };
     diagnostics::verbose(if cached.is_some() {
         "checkpoint de caché: hit"
@@ -188,6 +192,10 @@ fn main() {
     }
 }
 
+/// [API] LOCAL HEALTH REPORT
+///
+/// Performs read-only checks over configuration, local state, and optional
+/// executables. The report uses stable machine-readable states for CLI and JSON.
 fn doctor(json: bool) -> i32 {
     let config_path = config::config_file();
     let config = config_path.as_ref().map(|p| p.exists()).unwrap_or(false);
@@ -359,6 +367,11 @@ fn doctor(json: bool) -> i32 {
     report.exit_code()
 }
 
+/// [CACHE] COLLECTOR INDEX HEALTH
+///
+/// Requires every existing index to parse with its schema marker and retain
+/// private permissions. One invalid index fails the check because partial trust
+/// would hide a local data-safety problem.
 fn index_health(paths: &[std::path::PathBuf]) -> (diagnostics::CheckState, String) {
     let existing: Vec<_> = paths.iter().filter(|path| path.exists()).collect();
     if existing.is_empty() {
@@ -399,8 +412,10 @@ fn private_permissions(path: &std::path::Path) -> bool {
     path.exists()
 }
 
-/// Modo `--check` para scripts y hooks: imprime un resumen de una línea por
-/// hallazgo y devuelve el peor nivel como exit code.
+/// [API] SCRIPT CHECK MODE
+///
+/// Emits one summary line per finding and returns the highest severity as the
+/// exit code, making the command safe for scripts and hooks.
 fn check(status: &providers::Status) -> i32 {
     if !config::load_errors().is_empty() {
         println!("error     configuración inválida; ejecuta `lazysubs-eye doctor`");

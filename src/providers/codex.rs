@@ -18,7 +18,7 @@ fn default_codex_home() -> PathBuf {
     PathBuf::from(home).join(".codex")
 }
 
-/// Directorio efectivo de Codex (config o el default `~/.codex`).
+/// Effective Codex directory: configured path or default `~/.codex`.
 fn codex_home(codex_home: Option<&Path>) -> PathBuf {
     codex_home
         .map(Path::to_path_buf)
@@ -153,6 +153,9 @@ fn rate_limits_result_from_response(msg: &serde_json::Value) -> Result<Option<se
     ))
 }
 
+// [API] Speak the Codex JSON-RPC startup sequence, then wait only for request
+// ID 2. Notifications and initialization responses may arrive first and are ignored.
+// FAILURE MODE -> the deadline bounds a wedged app-server; `KillOnDrop` reaps it.
 pub fn collect(home: Option<&Path>) -> Result<ProviderStatus> {
     let mut command = Command::new("codex");
     command
@@ -160,7 +163,7 @@ pub fn collect(home: Option<&Path>) -> Result<ProviderStatus> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    // El app-server respeta CODEX_HOME para elegir la cuenta/credenciales.
+    // API boundary -> app-server uses `CODEX_HOME` to select account credentials.
     if let Some(home) = home {
         command.env("CODEX_HOME", home);
     }
@@ -204,7 +207,7 @@ pub fn collect(home: Option<&Path>) -> Result<ProviderStatus> {
             break result;
         }
     };
-    drop(child); // el guard mata el app-server; ya tenemos la respuesta
+    drop(child); // The drop guard terminates app-server once its response is captured.
 
     let parsed: RateLimitsResponse =
         serde_json::from_value(result).context("parseando rate limits")?;

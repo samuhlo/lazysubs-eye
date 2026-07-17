@@ -1,10 +1,15 @@
-//! Subcomandos `install` / `uninstall`: integración con waybar y Hyprland.
+//! [CORE] WAYBAR AND HYPRLAND INTEGRATION
 //!
-//! Edita los configs del usuario por texto (no se reserializa el JSONC, así
-//! se conservan sus comentarios y formato). Todo lo insertado va delimitado
-//! por marcadores `lazysubs-eye-begin` / `lazysubs-eye-end` (o `// lazysubs-eye` en
-//! líneas sueltas) para que `uninstall` pueda revertirlo con seguridad.
-//! Antes de tocar un fichero se guarda un backup `<fichero>.bak.<epoch>`.
+//! FLOW: discover the user's XDG config → preflight readable/writable base files
+//! → snapshot each target → atomically publish one owned edit → reload consumers.
+//! If a later mutation fails, rollback copies snapshots in reverse mutation order.
+//!
+//! This module edits user config as text instead of reserializing JSONC: comments,
+//! ordering, and unrelated formatting are user-owned and must survive untouched.
+//! Every insertion carries `lazysubs-eye-begin` / `lazysubs-eye-end` markers (or
+//! `// lazysubs-eye` on single lines). Those markers define uninstall's ownership
+//! boundary; unmarked manual integration is reported, never deleted. A unique
+//! `<file>.bak.<epoch>[.N]` snapshot is made before every attempted publish.
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -55,8 +60,13 @@ struct ConfigPaths {
     hyprland_conf: PathBuf,
 }
 
-/// Backups creados durante una operación. El rollback se aplica en orden
-/// inverso, porque una modificación posterior puede depender de una anterior.
+/// [FLOW] MUTATION JOURNAL
+///
+/// Each successful backup records `(destination, snapshot)` before its atomic
+/// replacement. On failure, restore in reverse mutation order: a later file may
+/// have made an earlier file's new state observable to a reloaded integration.
+/// FAILURE MODE: rollback is best-effort; callers retain both the original error
+/// and the affected paths if restoring a snapshot also fails.
 #[derive(Default)]
 struct BackupManager {
     entries: Vec<(PathBuf, PathBuf)>,
@@ -72,7 +82,7 @@ impl BackupManager {
         Ok(copy)
     }
 
-    #[allow(dead_code)] // Se conecta al ejecutor transaccional al agrupar el plan completo.
+    #[allow(dead_code)] // [NOTE] Connected when the full plan uses the transaction executor.
     fn rollback(&mut self) -> std::result::Result<(), InstallError> {
         let mut failed = Vec::new();
         for (destination, copy) in self.entries.iter().rev() {
@@ -90,8 +100,13 @@ impl BackupManager {
     }
 }
 
-/// Checks sin efectos antes de instalar: evita crear backups o editar a
-/// medias cuando falta alguno de los dos ficheros base de Waybar.
+/// [FLOW] INSTALL PREFLIGHT
+///
+/// Discovery resolves the expected XDG paths, then this phase proves Waybar's two
+/// required base files exist and can be opened for writing before any backup exists.
+/// Hyprland is optional by contract, so its absence is not an install failure.
+/// FAILURE MODE: permission/open failures stop here; they must not leave backups,
+/// generated module fragments, or a half-installed Waybar pair behind.
 fn preflight_install(paths: &ConfigPaths) -> Vec<InstallError> {
     let mut issues = Vec::new();
     if !paths.waybar_config.is_file() {
@@ -109,6 +124,11 @@ fn preflight_install(paths: &ConfigPaths) -> Vec<InstallError> {
     issues
 }
 
+/// [FLOW] UNINSTALL PREFLIGHT
+///
+/// Removal is stricter only where ownership markers already exist. A malformed
+/// marker pair or manual rule inside an owned block stops the transaction rather
+/// than guessing which user text is safe to remove.
 fn preflight_uninstall(paths: &ConfigPaths) -> Vec<InstallError> {
     let mut issues = Vec::new();
     for path in [
@@ -149,8 +169,13 @@ fn require_preflight(paths: &ConfigPaths) -> Result<()> {
     )
 }
 
-/// Omarchy detectado: existe `~/.local/share/omarchy` o hay `omarchy` en PATH.
-/// Guía todos los fallbacks (CSS, on-click, recarga, windowrule).
+/// [FLOW] OMARCHY CAPABILITY DETECTION
+///
+/// Detects `~/.local/share/omarchy` or the `omarchy` binary in PATH. This is a
+/// behavior switch, not a requirement: it selects theme-aware CSS, Omarchy's
+/// launch-or-focus action, and its Waybar restart command. Generic desktops keep
+/// working through freedesktop/process fallbacks instead of inheriting Omarchy-only
+/// assumptions.
 fn is_omarchy() -> bool {
     let data = std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
@@ -161,7 +186,12 @@ fn is_omarchy() -> bool {
     which("omarchy").is_some()
 }
 
-/// Primer directorio del PATH que contiene un ejecutable `name`.
+/// [DATA] PATH LOOKUP
+///
+/// Returns the first PATH directory containing a regular file named `name`.
+/// TRADE-OFF: this mirrors shell lookup without invoking a shell or parsing its
+/// aliases. It is capability discovery only; the external command remains a user
+/// environment boundary and may still fail when executed.
 fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
@@ -169,9 +199,11 @@ fn which(name: &str) -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
-/// El config de waybar puede llamarse `config.jsonc` (Omarchy) o `config` a
-/// secas (nombre estándar de waybar). Se prefiere el que exista; si no existe
-/// ninguno, se devuelve la ruta `.jsonc` para que el error sea claro.
+/// [DATA] WAYBAR CONFIG RESOLUTION
+///
+/// Waybar configuration may be `config.jsonc` under Omarchy or standard `config`.
+/// Prefer an existing file; otherwise return `.jsonc` so the missing-file error
+/// points to the expected path.
 fn resolve_waybar_config(waybar_dir: &Path) -> PathBuf {
     let jsonc = waybar_dir.join("config.jsonc");
     let plain = waybar_dir.join("config");
@@ -184,6 +216,12 @@ fn resolve_waybar_config(waybar_dir: &Path) -> PathBuf {
     }
 }
 
+/// [DATA] USER CONFIG ROOT
+///
+/// Prefer XDG_CONFIG_HOME, then the conventional `$HOME/.config`. All writes stay
+/// below this caller-selected root; the installer does not create a system-wide
+/// config or rewrite an Omarchy source tree. If neither environment variable is
+/// available, path discovery fails before preflight or mutation.
 fn config_paths() -> Result<ConfigPaths> {
     let config_home = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -201,9 +239,14 @@ fn config_paths_at(config_home: &Path) -> ConfigPaths {
     }
 }
 
-/// Ruta del binario para el `exec` del módulo. Si cae bajo $HOME se escribe
-/// con `$HOME` literal (waybar lo expande vía shell) para que el config sea
-/// portable entre máquinas.
+/// [API] MODULE EXECUTABLE PATH
+///
+/// Resolve the running binary before writing an `exec` value. `current_exe` is
+/// canonicalized first to avoid persisting a transient symlink spelling; `/proc`
+/// is only a platform fallback. The final path must name an executable regular file.
+/// Paths below `$HOME` are stored with literal `$HOME`, which Waybar expands through
+/// its shell, keeping copied user config portable across machines. This does not
+/// attempt to sandbox Waybar's shell: the chosen binary is explicitly trusted input.
 pub fn resolve_binary_path() -> std::result::Result<PathBuf, InstallError> {
     let path = std::env::current_exe()
         .ok()
@@ -239,14 +282,15 @@ fn exec_path() -> std::result::Result<String, InstallError> {
     })
 }
 
-/// Comando terminal para lanzar la TUI fuera de Omarchy. Preferimos el
-/// estándar freedesktop `xdg-terminal-exec`; si no, el primer terminal conocido
-/// con su invocación correcta. `None` = ningún terminal detectado.
+/// [API] GENERIC TUI LAUNCH
+///
+/// Outside Omarchy, prefer freedesktop `xdg-terminal-exec`; otherwise use the
+/// first known terminal with its required invocation. `None` means none found.
 fn fallback_launch_for(exec: &str, has_xdg_term: bool, terminal: Option<&str>) -> Option<String> {
     if has_xdg_term {
         return Some(format!("xdg-terminal-exec {exec}"));
     }
-    // foot y kitty aceptan el comando directo; alacritty y ghostty usan -e.
+    // [API] foot and kitty accept the command directly; alacritty and ghostty require -e.
     match terminal? {
         "foot" => Some(format!("foot {exec}")),
         "kitty" => Some(format!("kitty {exec}")),
@@ -262,8 +306,8 @@ fn detect_launch(exec: &str) -> Option<String> {
     fallback_launch_for(exec, has_xdg, terminal)
 }
 
-/// Comando `on-click` de la TUI: launch-or-focus en Omarchy, terminal genérico
-/// fuera. `None` si no hay forma de abrir (se instala sin on-click).
+/// Produces the TUI `on-click` command: Omarchy launch-or-focus there, generic
+/// terminal elsewhere. `None` installs the module without a click action.
 fn on_click(omarchy: bool, exec: &str) -> Option<String> {
     if omarchy {
         Some(format!("omarchy-launch-or-focus-tui {exec}"))
@@ -289,17 +333,15 @@ fn module_definition(exec: &str, signal: u8, on_click: Option<&str>) -> String {
 }
 
 fn style_block(omarchy: bool) -> String {
-    // La clase `error` usa `alpha(@foreground, …)` en Omarchy (el @import del
-    // tema define @foreground); fuera de Omarchy no existe esa variable, así que
-    // se usa un gris hex neutro. warning/critical llevan hex propios siempre.
+    // [UI] Omarchy defines `@foreground` through its theme import; generic
+    // Waybar does not, so error uses neutral hex. Warning and critical use hex everywhere.
     let error_color = if omarchy {
         "alpha(@foreground, 0.6)"
     } else {
         "#9a9a9a"
     };
-    // Sin salto inicial: cada línea del bloque lleva marcador o queda dentro de
-    // begin…end, de modo que `uninstall` lo revierta byte a byte (el separador
-    // con el CSS previo lo pone install según haga falta).
+    // [DATA] No leading newline: every line is marked or enclosed, so uninstall
+    // can restore bytes exactly. `install` adds the prior-CSS separator when needed.
     format!(
         "/* lazysubs-eye-begin */\n\
          #custom-ai-usage {{\n  margin: 0 8px;\n}}\n\n\
@@ -310,25 +352,30 @@ fn style_block(omarchy: bool) -> String {
     )
 }
 
-/// Inserta la entrada en `modules-right` y la definición del módulo en el
-/// config JSONC de waybar. Devuelve `None` si la estructura no es la esperada
-/// (en ese caso el llamador imprime el snippet para instalación manual).
+/// [DATA] TEXTUAL JSONC INSERTION
+///
+/// Inserts the `modules-right` entry and module definition without parsing JSONC.
+/// JSONC comments and user formatting survive because only proven offsets move.
+/// The bracket matcher locates the target array; definitions are inserted from the
+/// later offset first so the earlier array index remains valid.
+/// FAIL CLOSED: an unfamiliar member boundary returns `None`. The caller prints a
+/// manual snippet rather than guessing at JSONC grammar and corrupting user config.
 fn waybar_config_with_module(config: &str, module_def: &str) -> Option<String> {
     let key_pos = config.find("\"modules-right\"")?;
     let open = key_pos + config[key_pos..].find('[')?;
     let close = open + find_matching_bracket(&config[open..])?;
 
-    // Primero la inserción en la posición más tardía para no invalidar índices.
+    // ORDERING -> insert at the latest offset first so earlier indexes remain valid.
     let after_close = config[close + 1..]
         .char_indices()
         .find(|(_, c)| !c.is_whitespace())?;
     let (def_at, def_text) = match after_close.1 {
-        // "modules-right": [...] , → la definición va tras la coma, con coma final
+        // Existing following member: insert after its comma and keep a trailing comma.
         ',' => (
             close + 1 + after_close.0 + 1,
             format!("\n{module_def},\n  // lazysubs-eye-end"),
         ),
-        // "modules-right": [...] } → era el último miembro: coma antes, sin coma final
+        // Last member: add the preceding comma, but no trailing comma.
         '}' => (close + 1, format!(",\n{module_def}\n  // lazysubs-eye-end")),
         _ => return None,
     };
@@ -337,7 +384,7 @@ fn waybar_config_with_module(config: &str, module_def: &str) -> Option<String> {
     out.push_str(&def_text);
     out.push_str(&config[def_at..]);
 
-    // Entrada al principio de modules-right (con coma solo si el array no está vacío).
+    // Put the entry first; add a comma only when the array already has content.
     let array_empty = config[open + 1..close].trim().is_empty();
     let entry = if array_empty {
         format!("\n    \"{MODULE_KEY}\" // lazysubs-eye\n  ")
@@ -348,7 +395,10 @@ fn waybar_config_with_module(config: &str, module_def: &str) -> Option<String> {
     Some(out)
 }
 
-/// Offset del `]` que cierra el `[` en el que empieza `s`, saltando strings.
+/// [DATA] BRACKET MATCHER
+///
+/// Finds the closing `]` for `s`'s opening `[`, ignoring brackets inside quoted
+/// strings so JSONC values cannot terminate the array accidentally.
 fn find_matching_bracket(s: &str) -> Option<usize> {
     let mut depth = 0usize;
     let mut in_string = false;
@@ -378,9 +428,13 @@ fn find_matching_bracket(s: &str) -> Option<usize> {
     None
 }
 
-/// Elimina las líneas marcadas con `lazysubs-eye` y los bloques
-/// `lazysubs-eye-begin`…`lazysubs-eye-end` (inclusive). Devuelve el texto limpio y si
-/// hubo cambios.
+/// [DATA] OWNED-CONTENT REMOVAL
+///
+/// Uninstall removes only marked single lines and inclusive begin/end blocks,
+/// returning clean text plus whether an owned edit was found. Marker validation
+/// happens before this destructive transform: balanced markers alone are not
+/// enough when a user has placed a manual rule inside the claimed region.
+/// INVARIANT: unmarked matching module/CSS text remains user-owned and survives.
 fn strip_marked(text: &str) -> (String, bool) {
     let mut out = String::with_capacity(text.len());
     let mut in_block = false;
@@ -516,6 +570,11 @@ fn build_install_plan(paths: &ConfigPaths, omarchy: bool) -> Result<InstallPlan>
     Ok(plan)
 }
 
+/// [FLOW] SNAPSHOT BEFORE PUBLISH
+///
+/// Name backups beside their source so recovery does not depend on a separate
+/// writable directory. Epoch plus collision suffix prevents two writes in one
+/// second from silently overwriting the only rollback copy.
 fn backup(path: &Path) -> Result<PathBuf> {
     let epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -537,17 +596,27 @@ fn backup(path: &Path) -> Result<PathBuf> {
     Ok(bak)
 }
 
+/// [FLOW] BACKUP → ATOMIC PUBLISH
+///
+/// Register the snapshot before publishing the replacement. `atomic_save_system`
+/// prevents a watching Waybar/Hyprland process from reading a truncated file; if
+/// publish fails, the journal still has the pre-mutation bytes for rollback.
 fn write_with_backup(backups: &mut BackupManager, path: &Path, contents: &str) -> Result<()> {
     let bak = backups.backup(path)?;
-    // Escritura atómica: waybar vigila estos ficheros (reload_style_on_change)
-    // y el propio install reinicia servicios justo después; un write no
-    // atómico puede dejar que lean el fichero a medias.
+    // [CACHE] Atomic write: Waybar watches these files and installation reloads
+    // services immediately. A direct write could expose a half-written file.
     crate::cache::atomic_save_system(path, contents.as_bytes())
         .with_context(|| format!("no pude escribir {path:?}"))?;
     println!("  ✓ {} (backup: {})", path.display(), bak.display());
     Ok(())
 }
 
+/// [FLOW] PUBLISH → RELOAD CONSUMERS
+///
+/// Reload only after every requested file mutation has published. Waybar always
+/// needs the new module/style pair; Hyprland reloads only when its optional rule
+/// changed. Reload failures are surfaced to the user but do not rewrite config:
+/// disk state remains recoverable through the backups.
 fn reload(omarchy: bool, touched_hypr: bool) {
     println!("recargando…");
     reload_waybar(omarchy);
@@ -568,8 +637,8 @@ fn reload_waybar(omarchy: bool) {
         }
         return;
     }
-    // Fuera de Omarchy: SIGUSR2 hace que waybar recargue su config. Si no hay
-    // proceso, probamos el servicio de usuario; si tampoco, lo decimos.
+    // [API] Outside Omarchy, SIGUSR2 reloads Waybar config. If no process exists,
+    // try the user service; report the final fallback to the user.
     let signaled = Command::new("pkill")
         .args(["-SIGUSR2", "waybar"])
         .output()
@@ -603,6 +672,12 @@ fn reload_hyprland() {
     }
 }
 
+/// [FLOW] INSTALL TRANSACTION
+///
+/// The public entry point owns the rollback boundary. `install_inner` may touch
+/// several user files; any error after the first publish triggers reverse restore
+/// before the error escapes. A complete existing integration is idempotent and
+/// produces no backups, writes, or reload.
 pub fn install(signal: u8) -> Result<()> {
     let mut backups = BackupManager::new();
     match install_inner(signal, &mut backups) {
@@ -621,6 +696,14 @@ fn install_inner(signal: u8, backups: &mut BackupManager) -> Result<()> {
     install_with_paths(signal, &paths, backups, true)
 }
 
+/// [FLOW] DISCOVER → PREFLIGHT → PLANLESS APPLY → RELOAD
+///
+/// This shared engine powers the live install and sandbox mode. It validates the
+/// realtime signal before touching files, then independently installs Waybar JSONC,
+/// Waybar CSS, and the optional Hyprland rule. Each component is idempotent so a
+/// prior partial install is repaired by adding only missing owned pieces.
+/// ORDERING: reload is deferred until all mutations succeed; callers choose whether
+/// process reload is allowed in their environment.
 fn install_with_paths(
     signal: u8,
     paths: &ConfigPaths,
@@ -638,7 +721,7 @@ fn install_with_paths(
         println!("  · Omarchy no detectado: uso CSS neutro y fallbacks genéricos de waybar");
     }
 
-    // waybar config (config.jsonc en Omarchy, o `config` a secas)
+    // [DATA] Waybar config: `config.jsonc` in Omarchy, or standard `config`.
     let config = std::fs::read_to_string(&paths.waybar_config)
         .with_context(|| format!("no pude leer {:?}", paths.waybar_config))?;
     let click = on_click(omarchy, &exec);
@@ -673,7 +756,7 @@ fn install_with_paths(
         }
     }
 
-    // waybar style.css (CSS neutro fuera de Omarchy: sin @foreground)
+    // [UI] Waybar style: generic environments use neutral CSS without `@foreground`.
     let style = std::fs::read_to_string(&paths.waybar_style)
         .with_context(|| format!("no pude leer {:?}", paths.waybar_style))?;
     if style.contains("#custom-ai-usage") {
@@ -695,8 +778,8 @@ fn install_with_paths(
         changed = true;
     }
 
-    // hyprland.conf: la windowrule flotante solo si Hyprland está configurado.
-    // En otros compositores (sway, river…) se omite (ver README).
+    // [UI] Add the floating window rule only when Hyprland is configured.
+    // Other compositors such as Sway and River intentionally receive nothing.
     let mut touched_hypr = false;
     if paths.hyprland_conf.exists() {
         let hypr = std::fs::read_to_string(&paths.hyprland_conf)
@@ -734,8 +817,10 @@ fn install_with_paths(
     Ok(())
 }
 
-/// Ejecuta install contra un árbol XDG aislado. Nunca recarga procesos del
-/// host; con `dry_run` sólo devuelve el plan serializable.
+/// [API] SANDBOX INSTALL
+///
+/// Runs installation against an isolated XDG tree and never reloads host
+/// processes. With `dry_run`, returns only the serializable plan.
 pub fn install_sandbox(config_home: &Path, signal: u8, dry_run: bool) -> Result<InstallPlan> {
     let paths = config_paths_at(config_home);
     require_preflight(&paths)?;
@@ -753,8 +838,8 @@ pub fn install_sandbox(config_home: &Path, signal: u8, dry_run: bool) -> Result<
     Ok(plan)
 }
 
-/// Muestra el plan de instalación sin crear backups, editar archivos ni
-/// recargar procesos. Comparte las comprobaciones de lectura con `install`.
+/// Shows the installation plan without backups, file edits, or process reloads.
+/// Shares read-only preflight checks with `install`.
 pub fn install_dry_run(signal: u8) -> Result<()> {
     if !(1..=30).contains(&signal) {
         bail!("--signal debe estar entre 1 y 30 (RTMIN+N)");
@@ -769,6 +854,11 @@ pub fn install_dry_run(signal: u8) -> Result<()> {
     Ok(())
 }
 
+/// [FLOW] OWNERSHIP-CHECKED UNINSTALL
+///
+/// Uninstall uses the same transaction journal as install, but its authority is
+/// narrower: markers identify generated Waybar text, while the Hyprland class rule
+/// is the sole removable line. Manual lookalikes are preserved and reported.
 pub fn uninstall() -> Result<()> {
     let mut backups = BackupManager::new();
     match uninstall_inner(&mut backups) {
@@ -782,6 +872,11 @@ pub fn uninstall() -> Result<()> {
     }
 }
 
+/// [FLOW] PREFLIGHT → VALIDATE OWNERSHIP → STRIP → RELOAD
+///
+/// Validate every present owned block before writing any file. This ordering avoids
+/// removing CSS while a later config block reveals a marker conflict, and lets the
+/// outer transaction restore earlier writes if an unexpected I/O failure follows.
 fn uninstall_inner(backups: &mut BackupManager) -> Result<()> {
     let paths = config_paths()?;
     let issues = preflight_uninstall(&paths);
@@ -873,11 +968,11 @@ mod tests {
         assert!(out.contains("\"custom/ai-usage\", // lazysubs-eye"));
         assert!(out.contains("// lazysubs-eye-begin"));
         assert!(out.contains("\"signal\": 11,"));
-        // la entrada queda la primera del array
+        // The entry is first in the array.
         let entry = out.find("\"custom/ai-usage\",").unwrap();
         let tray = out.find("\"group/tray-expander\"").unwrap();
         assert!(entry < tray);
-        // sigue siendo JSON válido una vez quitados los comentarios
+        // Removing JSONC comments leaves valid JSON.
         let json: String = out
             .lines()
             .map(|l| match l.find("//") {
@@ -1080,8 +1175,8 @@ mod tests {
 
     #[test]
     fn strip_elimina_bloque_css_y_revierte_byte_a_byte() {
-        // install añade el bloque tras un CSS que termina en \n; uninstall debe
-        // devolverlo idéntico (sin líneas en blanco colgando).
+        // Install appends after CSS ending in \n; uninstall must restore it
+        // byte-for-byte without dangling blank lines.
         for omarchy in [true, false] {
             let original = "* { color: red; }\n";
             let style = format!("{original}{}", style_block(omarchy));
@@ -1137,7 +1232,7 @@ mod tests {
             "sin @foreground: {generic}"
         );
         assert!(generic.contains("#9a9a9a"));
-        // warning/critical llevan hex propios en ambos casos
+        // Warning and critical use dedicated hex colors in both modes.
         assert!(generic.contains("#e5c07b") && generic.contains("#e06c75"));
     }
 
@@ -1146,7 +1241,7 @@ mod tests {
         let def = module_definition("lazysubs-eye", 11, None);
         assert!(!def.contains("on-click\""), "sin on-click de apertura");
         assert!(def.contains("on-click-right"));
-        // envuelto como miembro de objeto y sin comentarios → JSON válido
+        // Wrapped as an object member and stripped of comments -> valid JSON.
         let json: String = format!("{{{}}}", def.replace("// lazysubs-eye-begin", ""))
             .lines()
             .map(|l| match l.find("//") {
@@ -1170,14 +1265,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        // sin ficheros → default .jsonc
+        // No files -> default to .jsonc.
         assert_eq!(resolve_waybar_config(&dir), dir.join("config.jsonc"));
 
-        // solo `config` (waybar estándar) → lo elige
+        // Only standard `config` exists -> select it.
         std::fs::write(dir.join("config"), "{}").unwrap();
         assert_eq!(resolve_waybar_config(&dir), dir.join("config"));
 
-        // si además existe .jsonc, gana el .jsonc
+        // If .jsonc also exists, it wins.
         std::fs::write(dir.join("config.jsonc"), "{}").unwrap();
         assert_eq!(resolve_waybar_config(&dir), dir.join("config.jsonc"));
 

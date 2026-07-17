@@ -1,14 +1,12 @@
-//! Historial de gasto de tokens por día en SQLite
-//! (`~/.local/state/lazysubs-eye/history.db`, respetando `XDG_STATE_HOME`).
+//! [CORE] Daily token history in SQLite.
 //!
-//! Cada escaneo de "hoy" hace un upsert (delete+insert) de las filas del día
-//! en curso, así el historial sobrevive aunque los JSONL/DB de origen se poden.
-//! La primera vez se pueblan los días pasados desde las fuentes (backfill).
+//! The database lives at `~/.local/state/lazysubs-eye/history.db`, honoring
+//! `XDG_STATE_HOME`. Each scan replaces the current `(day, source)` snapshot,
+//! so history survives source JSONL/DB pruning; the first run backfills past days.
 //!
-//! Las funciones de bajo nivel operan sobre `&Connection` para poder testearse
-//! con una base en memoria; los puntos de entrada (`record_source`,
-//! `ingest_today`, `maybe_backfill`, `period_rows`, `sparkline`) abren la base
-//! real y **nunca rompen el flujo**: ante cualquier error se degradan a vacío.
+//! Low-level functions accept `&Connection` for in-memory tests. Public entry
+//! points open the real database and fail closed to empty data: history must not
+//! break the status UI.
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, Local, NaiveDate};
@@ -21,17 +19,17 @@ pub const SOURCE_CLAUDE: &str = "claude";
 pub const SOURCE_PI: &str = "pi";
 pub const SOURCE_OPENCODE: &str = "opencode";
 
-/// Fuentes con historial, en el orden de los paneles de la TUI.
+/// [DATA] History sources, in TUI panel order.
 pub const SOURCES: [&str; 3] = [SOURCE_CLAUDE, SOURCE_PI, SOURCE_OPENCODE];
 
 const BACKFILL_META_KEY: &str = "backfill_v1";
 const BACKFILL_LAST_PREFIX: &str = "backfill_last_day_v1";
 const BACKFILL_PROGRESS_KEY: &str = "backfill_progress_v1";
-/// Nº de días que abarca el sparkline bajo cada panel.
+/// Number of trailing days shown below each panel.
 pub const SPARKLINE_DAYS: usize = 14;
 
-/// Progreso observable de un backfill. La fuente de verdad continúa en
-/// `meta`; este valor solo permite que la TUI se mantenga responsiva.
+/// [FLOW] Observable backfill progress. `meta` remains the source of truth;
+/// this value only lets the TUI report work without blocking rendering.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackfillProgress {
     pub current_day: Option<String>,
@@ -40,15 +38,19 @@ pub struct BackfillProgress {
     pub failed_days: usize,
 }
 
-/// Retención de una fuente de historial. `KeepForever` evita que la limpieza
-/// global borre accidentalmente datos de una fuente con una política distinta.
+/// Per-source retention policy. `KeepForever` prevents global cleanup from
+/// deleting data whose provider has a different retention contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RetentionPolicy {
     KeepDays(i64),
     KeepForever,
 }
 
-/// Fila agregada de uso: una por (día, fuente, provider, modelo) en la base.
+/// [DATA] One persisted aggregate per `(day, source, provider, model)`.
+///
+/// Token fields are whole-token counters; `cost` is the provider's floating
+/// currency amount. `total` is stored independently because providers may
+/// define it differently from the visible component sum.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct UsageRow {
     pub provider: String,
@@ -62,10 +64,10 @@ pub struct UsageRow {
     pub cost: f64,
 }
 
-/// Estado persistido de una ingesta para una fuente y un día concretos.
+/// [DATA] Persisted ingest state for one source-day.
 ///
-/// La clave de `meta` aporta la fuente y el día; los repetimos en el valor
-/// para que un export de la tabla siga siendo autoexplicativo y verificable.
+/// The `meta` key already encodes source and day; duplicating them in the value
+/// keeps exported rows self-describing and independently auditable.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum IngestState {
     Ingested {
@@ -115,10 +117,10 @@ fn backfill_last_key(source: &str) -> String {
     format!("{BACKFILL_LAST_PREFIX}:{source}")
 }
 
-/// Cutoff capturado antes de consultar una fuente. Para días históricos es el
-/// final del día local; para hoy nunca queda en el futuro.
+/// [FLOW] Capture a source cutoff before scanning. Historical days end at local
+/// 23:59:59; today is clamped to now so a scan never claims future usage.
 pub fn get_cutoff_timestamp(source: &str, day: NaiveDate) -> i64 {
-    let _ = source; // seam por fuente: permite políticas distintas sin duplicar scanners.
+    let _ = source; // API seam -> providers can later diverge on cutoff policy without duplicating scanners.
     use chrono::TimeZone;
     let day_end = Local
         .from_local_datetime(&day.and_hms_opt(23, 59, 59).expect("hora válida"))
@@ -136,11 +138,12 @@ fn fingerprint_meta_key(source: &str, day: &str) -> String {
     format!("ingest_fingerprint_v1:{source}:{day}")
 }
 
-/// Huella estable del agregado que se va a persistir. Es deliberadamente
-/// independiente de rutas o mtimes de los providers: la misma instantánea
-/// produce la misma huella y una fila cambiada fuerza reingesta.
+/// [CACHE] Stable fingerprint of the aggregate being persisted.
+///
+/// It excludes provider paths and mtimes: the same snapshot skips a rewrite,
+/// while any changed row forces re-ingestion.
 pub fn compute_day_fingerprint(source: &str, day: &str, rows: &[UsageRow]) -> String {
-    let mut hash = 0xcbf29ce484222325_u64; // FNV-1a, estable entre procesos.
+    let mut hash = 0xcbf29ce484222325_u64; // FNV-1a -> deterministic across processes, unlike a randomized hash map seed.
     let mut feed = |text: &str| {
         for byte in text.as_bytes() {
             hash ^= u64::from(*byte);
@@ -169,16 +172,16 @@ pub fn compute_day_fingerprint(source: &str, day: &str, rows: &[UsageRow]) -> St
     format!("fnv1a64:{hash:016x}")
 }
 
-/// Lee el estado normalizado de una fuente y día. Un valor de meta corrupto
-/// se trata como error, nunca como un día correctamente ingestado.
+/// Read normalized state for one source-day.
+/// FAIL CLOSED -> corrupt `meta` is an error, never proof of a completed ingest.
 pub fn ingest_state(conn: &Connection, source: &str, day: &str) -> Result<Option<IngestState>> {
     get_meta(conn, &ingest_meta_key(source, day))?
         .map(|raw| serde_json::from_str(&raw).context("estado de ingesta corrupto"))
         .transpose()
 }
 
-/// Último estado diario persistido de una fuente. Las fechas ISO forman parte
-/// de la clave, por lo que el orden lexicográfico coincide con el cronológico.
+/// Latest persisted daily state for a source. ISO dates are embedded in keys,
+/// so descending lexicographic order is also descending chronological order.
 pub fn latest_ingest_state(conn: &Connection, source: &str) -> Result<Option<IngestState>> {
     let prefix = format!("ingest_state_v1:{source}:%");
     let raw = conn
@@ -219,9 +222,9 @@ fn set_meta_tx(tx: &Transaction<'_>, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-/// Registra un fallo recuperable sin tocar los agregados que ya existían para
-/// ese día. El motivo es deliberadamente genérico: los errores de SQLite no
-/// deben acabar almacenados ni mostrados con rutas o detalles del sistema.
+/// Record a recoverable failure without touching that day's existing aggregate.
+/// The reason stays generic so SQLite paths and system details never cross into
+/// persisted or displayed state.
 fn mark_ingest_failed(conn: &Connection, source: &str, day: &str) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
     set_ingest_state_tx(
@@ -244,9 +247,9 @@ fn has_same_fingerprint(conn: &Connection, source: &str, day: &str, rows: &[Usag
         .is_some_and(|previous| previous == compute_day_fingerprint(source, day, rows))
 }
 
-/// Frontera transaccional de un día. Un fingerprint idéntico retorna Skipped
-/// sin reescribir ni datos ni meta; un fallo conserva el agregado previo y
-/// registra Failed en una transacción independiente.
+/// [FLOW] Transaction boundary for one day. An identical fingerprint returns
+/// `Skipped` without writing data or metadata; a failed replacement preserves
+/// the previous aggregate and records `Failed` in a separate transaction.
 pub fn ingest_single_day(
     conn: &Connection,
     day: &str,
@@ -266,10 +269,10 @@ pub fn ingest_single_day(
     ingest_state(conn, source, day)?.context("estado de ingesta ausente tras commit")
 }
 
-/// Conserva los registros recuperables y deja constancia explícita de que la
-/// instantánea no fue completa. El detalle del parser no cruza esta frontera:
-/// así `meta` nunca filtra rutas, SQL ni contenido potencialmente sensible.
-#[allow(dead_code)] // Seam para collectors que reporten errores recuperables por día.
+/// Keep recoverable rows while explicitly marking an incomplete snapshot.
+/// Parser detail cannot cross this boundary, so `meta` never leaks paths, SQL,
+/// or potentially sensitive content.
+#[allow(dead_code)] // API seam -> collectors can report recoverable per-day failures.
 pub fn ingest_partial_day(
     conn: &Connection,
     day: &str,
@@ -286,7 +289,7 @@ pub fn ingest_partial_day(
     ingest_state(conn, source, day)?.context("estado parcial ausente tras commit")
 }
 
-/// Periodo que agregan los paneles de tokens.
+/// [DATA] Period selected by token panels.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Period {
     Today,
@@ -303,7 +306,7 @@ impl Period {
         }
     }
 
-    /// Cicla hoy → semana → mes → hoy.
+    /// [FLOW] Cycle today → week → month → today.
     pub fn next(self) -> Period {
         match self {
             Period::Today => Period::Week,
@@ -321,8 +324,8 @@ impl Period {
     }
 }
 
-/// Rango de fechas [inicio, fin] (inclusive) del periodo respecto a `today`,
-/// en formato `YYYY-MM-DD`. Semana = lunes de la semana en curso; mes = día 1.
+/// Inclusive `[start, end]` range for `today`, formatted as `YYYY-MM-DD`.
+/// Week starts on the current Monday; month starts on day 1.
 pub fn period_bounds(period: Period, today: NaiveDate) -> (String, String) {
     let start = match period {
         Period::Today => today,
@@ -334,8 +337,7 @@ pub fn period_bounds(period: Period, today: NaiveDate) -> (String, String) {
     (start.to_string(), today.to_string())
 }
 
-/// Vista de la gráfica de gasto: días de la semana en curso, del mes en curso,
-/// o por horas de hoy.
+/// [DATA] Spend graph: current-week days, current-month days, or today's hours.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GraphView {
     Week,
@@ -361,15 +363,18 @@ impl GraphView {
     }
 }
 
-/// Serie lista para pintar: valores + etiquetas del eje x (una por valor).
+/// Render-ready series: one x-axis label per value.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct GraphData {
     pub values: Vec<u64>,
     pub labels: Vec<String>,
 }
 
-// --- capa de base de datos (pura, testable con Connection en memoria) --------
+// [DATA] Database layer: pure and testable with an in-memory `Connection`. ----
 
+// [DB] `daily_usage` is a replaceable source-day snapshot, while `meta` holds
+// cursors, fingerprints, and provenance. Their separate keys let failed scans
+// retain the last good aggregate without pretending that it is freshly read.
 pub fn init_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS daily_usage (
@@ -394,9 +399,9 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// Reemplaza (delete + insert) todas las filas de `(date, source)`. El escaneo
-/// es autoritativo para su día y fuente, así los modelos que desaparezcan no
-/// dejan restos.
+/// Replace every `(date, source)` row by delete-then-insert.
+/// INVARIANT -> a scan is authoritative for its day and source, so removed
+/// models cannot leave stale rows behind.
 pub fn record_day(conn: &Connection, date: &str, source: &str, rows: &[UsageRow]) -> Result<()> {
     record_day_with_state(conn, date, source, rows, None)
 }
@@ -419,6 +424,9 @@ fn record_day_with_state(
     )
 }
 
+// [DB] Delete, inserts, ingest state, fingerprint, and provenance share one
+// transaction. Readers therefore see either the old complete snapshot or the
+// new complete snapshot, never a day temporarily emptied by replacement.
 fn record_day_at(
     conn: &Connection,
     date: &str,
@@ -501,7 +509,11 @@ fn record_day_at(
     Ok(())
 }
 
-/// Uso agregado por (provider, modelo) de una fuente en el rango [start, end].
+/// [DB] Aggregate source usage by `(provider, model)` over inclusive `[start, end]`.
+///
+/// Dates are fixed-width ISO local dates, so text comparison is chronological.
+/// SQL returns the stable display order; an individual decode error is omitted
+/// rather than making a status panel fail, which can under-report corrupt rows.
 pub fn query_period(
     conn: &Connection,
     source: &str,
@@ -534,8 +546,8 @@ pub fn query_period(
     Ok(rows.filter_map(Result::ok).collect())
 }
 
-/// Itera SQLite en lotes acotados. El statement conserva su cursor y solo el
-/// batch actual vive en memoria; el consumidor decide si agrega o persiste.
+/// [FLOW] Stream SQLite in bounded batches. The statement retains its cursor
+/// while only one batch lives in memory; the caller chooses aggregation or persistence.
 pub fn query_streaming<T, P, F, C>(
     conn: &Connection,
     sql: &str,
@@ -568,7 +580,7 @@ where
     Ok(())
 }
 
-/// Total diario sumando **todas** las fuentes en el rango [start, end].
+/// Daily total across **all** sources in inclusive `[start, end]`.
 pub fn all_daily_totals(conn: &Connection, start: &str, end: &str) -> Result<Vec<(String, u64)>> {
     let mut totals = Vec::new();
     query_streaming(
@@ -592,7 +604,7 @@ pub fn all_daily_totals(conn: &Connection, start: &str, end: &str) -> Result<Vec
     Ok(totals)
 }
 
-/// Total diario de una fuente en el rango [start, end], por fecha.
+/// Per-date daily total for one source in inclusive `[start, end]`.
 pub fn daily_totals(
     conn: &Connection,
     source: &str,
@@ -613,8 +625,8 @@ pub fn daily_totals(
     Ok(rows.filter_map(Result::ok).collect())
 }
 
-/// Serie de totales diarios rellenada con ceros para los últimos `days` días
-/// terminando en `today` (más antiguo primero), lista para un Sparkline.
+/// Daily totals for the trailing `days`, ending at `today`, with zero-filled
+/// gaps and oldest-first ordering for the sparkline.
 pub fn series_last_n(
     conn: &Connection,
     source: &str,
@@ -633,8 +645,11 @@ pub fn series_last_n(
         .collect())
 }
 
-/// Borra las filas más viejas que `keep_days` respecto a `today`. `keep_days`
-/// <= 0 = sin límite (no borra nada).
+/// [DB] Delete rows older than `keep_days` relative to local `today`.
+/// `keep_days <= 0` means unlimited retention, so nothing is deleted.
+///
+/// The boundary is exclusive: `today - keep_days` remains. Retention removes
+/// aggregates only; stale `meta` is harmless because a future ingest rewrites it.
 pub fn prune(conn: &Connection, keep_days: i64, today: NaiveDate) -> Result<()> {
     let policy = if keep_days <= 0 {
         RetentionPolicy::KeepForever
@@ -647,8 +662,7 @@ pub fn prune(conn: &Connection, keep_days: i64, today: NaiveDate) -> Result<()> 
     Ok(())
 }
 
-/// Poda exclusivamente la fuente indicada; nunca mezcla providers al aplicar
-/// una política de retención.
+/// Prune only the named source; retention policies never cross providers.
 pub fn prune_source(
     conn: &Connection,
     source: &str,
@@ -689,7 +703,7 @@ fn set_meta(conn: &Connection, key: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-// --- conversiones de las filas de los escáneres a UsageRow -------------------
+// [DATA] Scanner-row conversions into `UsageRow`. ------------------------------
 
 pub fn rows_from_claude(models: &[crate::tokens::ModelTokens]) -> Vec<UsageRow> {
     models
@@ -724,6 +738,10 @@ pub fn rows_from_pi(rows: &[crate::pi_tokens::PiUsageRow]) -> Vec<UsageRow> {
         .collect()
 }
 
+// [DATA] OpenCode preserves unknown fields as `None`; history uses zero only
+// at this storage boundary. Its explicit total wins, otherwise components form
+// a best-effort total. This makes historical charts numeric but loses the
+// distinction between an absent provider field and a measured zero.
 pub fn rows_from_opencode(rows: &[crate::opencode_tokens::OpenCodeUsageRow]) -> Vec<UsageRow> {
     rows.iter()
         .map(|r| {
@@ -749,7 +767,7 @@ pub fn rows_from_opencode(rows: &[crate::opencode_tokens::OpenCodeUsageRow]) -> 
         .collect()
 }
 
-// --- puntos de entrada de alto nivel (abren la base real) --------------------
+// [API] High-level entry points that open the real database. ------------------
 
 fn state_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_STATE_HOME")
@@ -767,7 +785,9 @@ pub fn database_path() -> Option<PathBuf> {
     db_path()
 }
 
-/// Abre (creando el fichero y el esquema si hace falta) la base de historial.
+/// [DB] Open history storage, creating the file and schema when absent.
+/// The directory is private and a newly created database starts at mode 0600;
+/// later opens reapply restrictions because an existing file may have drifted.
 pub fn open() -> Result<Connection> {
     let path = db_path().context("sin HOME ni XDG_STATE_HOME")?;
     if let Some(dir) = path.parent() {
@@ -794,8 +814,8 @@ fn today_local() -> NaiveDate {
     Local::now().date_naive()
 }
 
-/// Registra las filas de HOY de una fuente y poda el historial. Silencioso: los
-/// errores no rompen la UI. `stats.enabled = false` lo desactiva por completo.
+/// Record one source's TODAY rows, then prune history.
+/// FAILURE MODE -> errors must not break the UI; `stats.enabled = false` disables it entirely.
 pub fn record_source(source: &str, rows: &[UsageRow]) {
     let config = crate::config::get();
     if !config.stats.enabled {
@@ -815,9 +835,13 @@ pub fn record_source(source: &str, rows: &[UsageRow]) {
     }
 }
 
-/// Escanea las tres fuentes y registra el uso de hoy. Punto de ingesta del
-/// camino fresco de main (waybar/--json en cache-miss). Hace el backfill la
-/// primera vez.
+/// [FLOW] Scan all three sources and record today's usage.
+///
+/// A cache miss reaches here: backfill first freezes recoverable past days,
+/// then each live collector parses its source into `UsageRow`, fingerprints and
+/// atomically replaces today's snapshot. OpenCode contributes only ready or
+/// stale rows; loading/unavailable avoids persisting a false zero.
+/// This is the fresh-main ingestion path (waybar/`--json` cache miss).
 pub fn ingest_today() {
     let config = crate::config::get();
     if !config.stats.enabled {
@@ -846,17 +870,17 @@ fn opencode_ready_rows(
     }
 }
 
-/// Puebla los días pasados desde las fuentes que aún existan, una sola vez
-/// (marcado en la tabla `meta`). Best-effort por fuente.
+/// Backfill past days from sources that still exist, once (`meta` marks it).
+/// Each source is best-effort.
 pub fn maybe_backfill() {
     maybe_backfill_with_progress_cancelled(|_| {}, || false);
 }
 
-/// Ejecuta el backfill notificando tras cada día confirmado o fallido. Debe
-/// llamarse desde un worker: leer las fuentes nunca bloquea el render de TUI.
-/// Variante cancelable usada por la TUI. La cancelación se consulta entre
-/// días, que son las unidades transaccionales: nunca deja medio commit y el
-/// último día confirmado permite reanudar en la siguiente ejecución.
+/// [FLOW] Run backfill and report after each confirmed or failed day.
+///
+/// Call from a worker: source reads must not block TUI rendering. Cancellation
+/// is checked between transactional days, never mid-commit; the last confirmed
+/// day becomes the resume cursor for the next run.
 pub fn maybe_backfill_with_progress_cancelled<F, C>(mut report: F, cancelled: C)
 where
     F: FnMut(BackfillProgress),
@@ -874,8 +898,8 @@ where
     }
 
     let today = today_local().to_string();
-    // Los días pasados se congelan; el día en curso lo refresca la ingesta
-    // normal, así que aquí no lo tocamos para no pisar un escaneo más fresco.
+    // Past days are frozen; normal ingestion refreshes today.
+    // ORDERING -> do not let this backfill overwrite a fresher current-day scan.
     let mut plans = vec![
         (
             SOURCE_CLAUDE,
@@ -914,6 +938,9 @@ where
     report(progress.clone());
     let mut had_failure = false;
     let mut was_cancelled = false;
+    // [FLOW] Source scans are ordered by day. Advance a source resume cursor
+    // only through a contiguous success prefix: a later success must not hide
+    // an earlier failed day from the next backfill.
     for (source, days) in plans {
         let mut contiguous = true;
         for (date, rows) in days {
@@ -957,8 +984,8 @@ where
     );
 }
 
-/// Filas agregadas de una fuente para el periodo (para los paneles de la TUI).
-/// Vacío ante cualquier error o si el historial está desactivado.
+/// Aggregated source rows for a TUI period. Returns empty on error or when
+/// history is disabled.
 pub fn period_rows(source: &str, period: Period) -> Vec<UsageRow> {
     if !crate::config::get().stats.enabled {
         return vec![];
@@ -969,8 +996,8 @@ pub fn period_rows(source: &str, period: Period) -> Vec<UsageRow> {
         .unwrap_or_default()
 }
 
-/// Estado diario más reciente para presentación; los errores se degradan a
-/// ausencia para mantener la TUI operativa (doctor sí informa el fallo de DB).
+/// Latest daily state for display. Errors become absence to keep the TUI alive;
+/// the doctor command still reports the database failure.
 pub fn latest_source_state(source: &str) -> Option<IngestState> {
     open()
         .and_then(|conn| latest_ingest_state(&conn, source))
@@ -978,8 +1005,9 @@ pub fn latest_source_state(source: &str) -> Option<IngestState> {
         .flatten()
 }
 
-/// Serie de la gráfica de gasto (todas las fuentes) para la vista dada. Vacío
-/// ante error o si el historial está desactivado.
+/// [FLOW] Spend graph series across all sources for this view. Empty on error
+/// or when history is disabled. Day/month views read persisted local-day rows;
+/// hours intentionally rescan live sources because SQLite stores no hour key.
 pub fn graph_data(view: GraphView) -> GraphData {
     if !crate::config::get().stats.enabled {
         return GraphData::default();
@@ -996,7 +1024,7 @@ pub fn graph_data(view: GraphView) -> GraphData {
     }
 }
 
-/// Suma por hora de hoy de las tres fuentes (Claude/Pi/OpenCode).
+/// Sum today's hourly usage across Claude, Pi, and OpenCode.
 fn today_hourly_total() -> [u64; 24] {
     let claude = crate::tokens::claude_today_hourly();
     let pi = crate::pi_tokens::scan_pi_today_hourly();
@@ -1008,7 +1036,7 @@ fn today_hourly_total() -> [u64; 24] {
     out
 }
 
-/// Días de la semana en curso (lunes→domingo), total de todas las fuentes.
+/// Current-week days (Monday → Sunday), totaling every source.
 fn week_series(conn: &Connection, today: NaiveDate) -> GraphData {
     let monday = today - chrono::Duration::days(today.weekday().num_days_from_monday() as i64);
     let lookup: std::collections::HashMap<String, u64> = all_daily_totals(
@@ -1032,7 +1060,7 @@ fn week_series(conn: &Connection, today: NaiveDate) -> GraphData {
     }
 }
 
-/// Días del mes en curso (1→hoy), total de todas las fuentes.
+/// Current-month days (1 → today), totaling every source.
 fn month_series(conn: &Connection, today: NaiveDate) -> GraphData {
     let first = today.with_day(1).unwrap_or(today);
     let lookup: std::collections::HashMap<String, u64> =
@@ -1058,7 +1086,7 @@ fn hours_series(hourly: [u64; 24]) -> GraphData {
     }
 }
 
-/// Serie diaria para el sparkline de una fuente. Vacío si está desactivado.
+/// Per-source daily sparkline series. Empty when disabled.
 pub fn sparkline(source: &str) -> Vec<u64> {
     let config = crate::config::get();
     if !config.stats.enabled || !config.stats.sparkline {
@@ -1092,7 +1120,7 @@ mod tests {
 
     #[test]
     fn period_bounds_calendario() {
-        // 2026-07-14 es martes → lunes es el 13; mes empieza el 1.
+        // 2026-07-14 is Tuesday -> Monday is the 13th; the month starts on the 1st.
         let today = NaiveDate::from_ymd_opt(2026, 7, 14).unwrap();
         assert_eq!(
             period_bounds(Period::Today, today),
@@ -1129,7 +1157,7 @@ mod tests {
             &[row("a", 10), row("b", 5)],
         )
         .unwrap();
-        // segunda pasada con menos modelos: 'b' desaparece
+        // The second authoritative scan omits model `b`, so it must disappear.
         record_day(&conn, "2026-07-14", SOURCE_CLAUDE, &[row("a", 20)]).unwrap();
         let rows = query_period(&conn, SOURCE_CLAUDE, "2026-07-14", "2026-07-14").unwrap();
         assert_eq!(rows.len(), 1);
@@ -1149,7 +1177,7 @@ mod tests {
         )
         .unwrap();
         let rows = query_period(&conn, SOURCE_CLAUDE, "2026-07-13", "2026-07-14").unwrap();
-        // ordenado por total desc: b(30) antes que a(15)
+        // ORDERING -> descending total places b(30) before a(15).
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].model, "b");
         assert_eq!(rows[0].total, 30);
@@ -1165,7 +1193,7 @@ mod tests {
         record_day(&conn, "2026-07-01", SOURCE_CLAUDE, &[row("a", 7)]).unwrap();
         let rows = query_period(&conn, SOURCE_CLAUDE, "2026-07-13", "2026-07-14").unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].total, 10); // el del 01 queda fuera del rango
+        assert_eq!(rows[0].total, 10); // The 1st is outside the requested range.
     }
 
     #[test]
@@ -1181,7 +1209,7 @@ mod tests {
         )
         .unwrap();
         let series = series_last_n(&conn, SOURCE_CLAUDE, today, 4).unwrap();
-        // días 11,12,13,14 → 0, 2, 0, 4
+        // Days 11, 12, 13, 14 -> 0, 2, 0, 4.
         assert_eq!(series, vec![0, 2, 0, 4]);
     }
 
@@ -1199,7 +1227,7 @@ mod tests {
         prune(&conn, 90, today).unwrap();
         assert_eq!(days(&conn), 1, "el día viejo se poda");
 
-        // keep_days = 0 no borra nada
+        // `keep_days = 0` means unlimited retention.
         record_day(&conn, "2026-01-01", SOURCE_CLAUDE, &[row("a", 1)]).unwrap();
         prune(&conn, 0, today).unwrap();
         assert_eq!(days(&conn), 2);
@@ -1541,7 +1569,7 @@ mod tests {
     #[test]
     fn week_series_lunes_a_domingo_con_ceros() {
         let conn = mem();
-        // 2026-07-15 es miércoles; la semana va del lunes 13 al domingo 19.
+        // 2026-07-15 is Wednesday; the week runs Monday 13th through Sunday 19th.
         let today = NaiveDate::from_ymd_opt(2026, 7, 15).unwrap();
         record_day(&conn, "2026-07-13", SOURCE_CLAUDE, &[row("a", 10)]).unwrap();
         record_day(&conn, "2026-07-13", SOURCE_PI, &[row("a", 5)]).unwrap();

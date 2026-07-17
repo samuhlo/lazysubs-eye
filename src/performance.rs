@@ -1,6 +1,7 @@
-//! Presupuestos de regresión, deliberadamente holgados para CI compartida.
-//! El baseline medido vive en `perf/baseline.json`; estos valores son techos,
-//! no objetivos de benchmark.
+//! [NOTE] REGRESSION BUDGETS
+//!
+//! These ceilings intentionally allow CI variance. Measured baselines live in
+//! `perf/baseline.json`; budgets catch regressions, not benchmark targets.
 
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,11 @@ impl Default for PerformanceBudget {
     }
 }
 
+/// [NOTE] SINGLE-SAMPLE REGRESSION GUARD
+///
+/// Runs optional warmups outside timing, then measures one operation against a
+/// 10% tolerance. WHY: warmups remove one-time setup noise while the tolerance
+/// avoids failing shared CI for minor scheduler variance.
 pub fn measure_budget(
     budget: Duration,
     warmups: usize,

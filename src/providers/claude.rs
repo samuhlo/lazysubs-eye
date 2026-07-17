@@ -29,9 +29,9 @@ struct OauthAccount {
     email_address: Option<String>,
 }
 
-/// Identidad de la cuenta desde `~/.claude.json` (`oauthAccount.emailAddress`).
-/// Solo lee el email; nunca toca los tokens. None si el fichero no existe o no
-/// lo tiene (degrada sin ruido: la cuenta es un extra informativo).
+/// [DATA] Account identity from `~/.claude.json` (`oauthAccount.emailAddress`).
+/// Read only the email, never tokens. Missing data becomes `None`: account
+/// identity is informational and must not make collection fail.
 fn account_identity() -> Option<String> {
     let home = std::env::var_os("HOME")?;
     let path = PathBuf::from(home).join(".claude.json");
@@ -132,8 +132,8 @@ fn label_for(l: &Limit) -> String {
 pub fn collect(creds_path: &Path) -> Result<ProviderStatus> {
     let raw = std::fs::read_to_string(creds_path).context("leyendo credenciales")?;
     let creds: CredsFile = serde_json::from_str(&raw).context("parseando credenciales")?;
-    // El email solo es fiable para la cuenta primaria (~/.claude.json es único);
-    // para credenciales de otra cuenta no lo autodetectamos (va el alias).
+    // `~/.claude.json` identifies only the primary account.
+    // FAIL CLOSED -> alternate credentials use their configured alias, not a guessed email.
     let account = (creds_path == default_creds_path())
         .then(account_identity)
         .flatten();

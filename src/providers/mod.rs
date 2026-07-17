@@ -10,10 +10,10 @@ const REFRESH_GLOBAL_BUDGET: Duration = Duration::from_secs(8);
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Window {
-    /// Short label shown in the UI: "5h", "semana", "semana · Fable"…
+    /// Compact UI label, such as `5h`, `semana`, or `semana · Fable`.
     pub label: String,
     pub used_percent: f64,
-    /// Unix seconds; None when the provider doesn't report a reset time.
+    /// Reset timestamp in Unix seconds; `None` when the provider omits it.
     pub resets_at: Option<i64>,
     pub active: bool,
 }
@@ -24,15 +24,15 @@ pub struct ProviderStatus {
     pub name: String,
     pub icon: String,
     pub plan: Option<String>,
-    /// Identidad de la cuenta (email o alias). serde skip si None para
-    /// mantener el contrato JSON estable (como stale_since).
+    /// Account identity (email or alias). Omit `None` during serialization to
+    /// preserve the stable JSON contract, like `stale_since`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
     pub windows: Vec<Window>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reset_credits_available: Option<u64>,
-    /// Unix secs de cuándo se obtuvieron estos datos, si son de una consulta
-    /// anterior conservada porque la fresca falló (p. ej. 429).
+    /// Unix seconds when these data were fetched, if a prior result was retained
+    /// because the fresh request failed (for example, HTTP 429).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stale_since: Option<i64>,
     pub error: Option<String>,
@@ -69,13 +69,12 @@ pub struct Status {
     pub providers: Vec<ProviderStatus>,
 }
 
-/// Cuánto tiempo se siguen mostrando los datos de la última consulta buena
-/// cuando la fresca falla (429 puntual, corte de red…). Pasado el plazo, el
-/// error se muestra tal cual.
+/// [CACHE] How long the last successful data remain visible after a fresh
+/// failure (transient 429 or network loss). After this grace period, show the error.
 const STALE_GRACE_SECS: i64 = 30 * 60;
 
-/// Sustituye los providers en error por sus datos de la consulta anterior si
-/// aún están dentro del periodo de gracia, marcándolos con `stale_since`.
+/// Replace failed providers with prior successful data inside the grace period,
+/// marking the preserved result with `stale_since`.
 fn keep_stale_data(providers: &mut [ProviderStatus], previous: &Status, now: i64) {
     for provider in providers {
         if provider.error.is_none() {
@@ -88,8 +87,8 @@ fn keep_stale_data(providers: &mut [ProviderStatus], previous: &Status, now: i64
         else {
             continue;
         };
-        // Si lo guardado ya era stale, la edad cuenta desde la consulta buena
-        // original, no desde la última vez que se re-guardó.
+        // If cached data are already stale, age begins at the original good fetch,
+        // not the last time stale data were saved.
         let data_from = old.stale_since.unwrap_or(previous.fetched_at);
         if now - data_from <= STALE_GRACE_SECS {
             let mut kept = old.clone();
@@ -99,8 +98,8 @@ fn keep_stale_data(providers: &mut [ProviderStatus], previous: &Status, now: i64
     }
 }
 
-/// Providers visibles en una superficie (waybar o TUI), en el orden pedido.
-/// `None` = todos en el orden de colección; ids desconocidos se ignoran.
+/// Providers visible on one surface (waybar or TUI), in requested order.
+/// `None` selects collection order; unknown IDs are ignored.
 pub fn select<'a>(
     providers: &'a [ProviderStatus],
     selection: &Option<Vec<String>>,
@@ -114,7 +113,7 @@ pub fn select<'a>(
     }
 }
 
-/// Una cuenta ya resuelta lista para colectar (id/nombre compuestos + icono).
+/// Resolved account ready for collection: composed ID, name, and optional icon.
 #[derive(Debug, Clone, PartialEq)]
 struct AccountSpec {
     id: String,
@@ -122,9 +121,9 @@ struct AccountSpec {
     icon_override: Option<String>,
 }
 
-/// Compone id y nombre. La primera/única cuenta conserva el id simple
-/// ("claude") para no romper las listas de superficie ni las notificaciones,
-/// que son por id; las siguientes usan `base:alias`.
+/// Compose account ID and name. The first or only account keeps the plain ID
+/// (`claude`) to preserve ID-based surfaces and notifications; later accounts
+/// use `base:alias`.
 fn compose(
     base_id: &str,
     base_name: &str,
@@ -234,7 +233,7 @@ fn codex_targets(config: &crate::config::Config) -> Vec<(AccountSpec, Option<std
 fn minimax_targets(config: &crate::config::Config) -> Vec<(AccountSpec, String, Option<String>)> {
     let accounts = &config.accounts.minimax;
     if accounts.is_empty() {
-        // Azúcar de una sola cuenta: [minimax] api_key / MINIMAX_API_KEY.
+        // Single-account shorthand: `[minimax] api_key` / `MINIMAX_API_KEY`.
         return match minimax::primary_api_key() {
             Some(key) => {
                 let (id, name) = compose("minimax", "MiniMax", 1, 0, "");
@@ -270,9 +269,8 @@ fn minimax_targets(config: &crate::config::Config) -> Vec<(AccountSpec, String, 
         .collect()
 }
 
-/// Ids y nombres cortos de las cuentas configuradas, para construir las filas
-/// de providers del panel de opciones de la TUI (independiente de que estén
-/// disponibles en disco). Respeta los toggles `[providers]`.
+/// Configured account IDs and short names for TUI settings rows, independent
+/// of filesystem availability. Honors `[providers]` toggles.
 pub fn configured_providers() -> Vec<(String, String)> {
     let config = crate::config::get();
     let mut out = Vec::new();
@@ -300,6 +298,9 @@ pub fn configured_providers() -> Vec<(String, String)> {
     out
 }
 
+// [FLOW] Collect provider families concurrently under one refresh budget.
+// Results are restored to family order after arrival; timed-out families reuse
+// stale cache when possible, otherwise surface an explicit provider error.
 pub fn collect_all() -> Status {
     let config = crate::config::get();
     let claude_config = config.clone();
@@ -424,6 +425,8 @@ pub fn collect_all() -> Status {
     }
 }
 
+// [FLOW] Receive only until the shared deadline. Workers may finish later, but
+// their late results cannot delay this refresh or reorder accepted batches.
 fn collect_until_budget<T>(
     receiver: mpsc::Receiver<(usize, T)>,
     expected: usize,
@@ -496,14 +499,14 @@ mod tests {
     fn claude_targets_default_y_multicuenta() {
         use crate::config::{ClaudeAccount, Config};
 
-        // sin accounts → una cuenta, id simple, creds por defecto
+        // No accounts -> one account, plain ID, default credentials.
         let default = Config::default();
         let targets = claude_targets(&default);
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].0.id, "claude");
         assert_eq!(targets[0].1, claude::default_creds_path());
 
-        // dos cuentas → ids claude y claude:trabajo, creds expandidos
+        // Two accounts -> `claude` and `claude:trabajo`, with expanded credentials.
         let mut config = Config::default();
         config.accounts.claude = vec![
             ClaudeAccount {
@@ -534,7 +537,7 @@ mod tests {
     fn minimax_targets_vacio_sin_key() {
         use crate::config::Config;
         let mut config = Config::default();
-        // sin api_key ni accounts → sin targets (env puede tener MINIMAX_API_KEY)
+        // No API key or accounts -> no targets; the environment may provide `MINIMAX_API_KEY`.
         std::env::remove_var("MINIMAX_API_KEY");
         config.minimax.api_key = None;
         assert!(minimax_targets(&config).is_empty());
@@ -587,7 +590,7 @@ mod tests {
 
     #[test]
     fn la_gracia_cuenta_desde_la_consulta_buena_original() {
-        // el previo ya era stale: su edad viene de stale_since, no de fetched_at
+        // Already-stale data age from `stale_since`, not `fetched_at`.
         let mut old = provider("claude", 42.0, None);
         old.stale_since = Some(5_000);
         let previous = Status {

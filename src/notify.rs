@@ -1,10 +1,9 @@
-//! Notificaciones de escritorio al cruzar los umbrales de uso.
+//! [FLOW] THRESHOLD NOTIFICATIONS
 //!
-//! Se llama tras cada consulta fresca (waybar corre el binario cada 60s sin
-//! estado entre ejecuciones), así que el último nivel notificado por ventana
-//! se persiste en `~/.cache/lazysubs-eye/notify-state.json` para no spamear:
-//! solo se notifica al *subir* de nivel (none→warning, warning→critical) y el
-//! estado se limpia cuando la ventana se resetea o baja del umbral.
+//! Waybar starts a fresh process every 60 seconds, so the last alert level per
+//! window is persisted in `~/.cache/lazysubs-eye/notify-state.json`. Alerts fire
+//! only when usage rises (none→warning, warning→critical); state clears after a
+//! reset or when usage remains below the threshold past the cooldown.
 
 use crate::providers::Status;
 use crate::{cache, config, output};
@@ -14,11 +13,11 @@ use std::process::Command;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 struct WindowState {
-    /// Último nivel notificado: 1 = warning, 2 = critical.
+    /// Last notified level: 1 = warning, 2 = critical.
     level: u8,
     resets_at: Option<i64>,
-    /// Unix secs de la última notificación de esta ventana; ancla el
-    /// cooldown. `default` para leer estados de versiones anteriores.
+    /// Unix seconds of this window's last alert; anchors the cooldown.
+    /// `default` keeps state written by earlier versions readable.
     #[serde(default)]
     notified_at: i64,
 }
@@ -45,13 +44,12 @@ fn level_for(percent: f64, warning_at: f64, critical_at: f64) -> u8 {
     }
 }
 
-/// Decide qué notificar y el nuevo estado. Pura para poder testearla.
+/// [FLOW] ALERT STATE TRANSITION
 ///
-/// Reglas: se notifica al subir de nivel dentro de la misma ventana
-/// (`resets_at` igual), pero re-notificar el mismo nivel — por reset de la
-/// ventana o por bajar y volver a cruzar — respeta un `cooldown` desde la
-/// última notificación. Subir a un nivel nunca notificado antes (p. ej.
-/// warning→critical) salta el cooldown: es información nueva.
+/// Pure planner: returns alerts and the next persisted state for testable policy.
+/// A higher level in the same window notifies immediately. Repeating a level
+/// after a reset or recrossing waits for `cooldown`; warning→critical bypasses
+/// that wait because it conveys new information.
 fn plan(
     status: &Status,
     state: &State,
@@ -65,8 +63,8 @@ fn plan(
 
     for provider in &status.providers {
         if provider.error.is_some() {
-            // Sin datos frescos no se puede decidir; conserva el estado previo
-            // para no re-notificar cuando el provider se recupere sin cambios.
+            // FAIL CLOSED -> without fresh data, retain state so recovery does
+            // not replay an unchanged alert.
             for (key, value) in state.range(format!("{}|", provider.id)..) {
                 if !key.starts_with(&format!("{}|", provider.id)) {
                     break;
@@ -79,13 +77,13 @@ fn plan(
             let key = format!("{}|{}", provider.id, window.label);
             let level = level_for(window.used_percent, warning_at, critical_at);
             let previous = state.get(&key).copied();
-            // Nivel ya notificado en ESTA ventana; un reset lo deja a 0…
+            // The level notified in THIS window; a reset makes it zero…
             let notified_level = previous
                 .filter(|s| s.resets_at == window.resets_at)
                 .map(|s| s.level)
                 .unwrap_or(0);
-            // …pero el cooldown sobrevive a los resets (ventanas rodantes
-            // como la de MiniMax cambian resets_at en cada consulta).
+            // …but cooldown survives resets because rolling windows such as
+            // MiniMax change `resets_at` on every read.
             let last_level = previous.map(|s| s.level).unwrap_or(0);
             let last_at = previous.map(|s| s.notified_at).unwrap_or(0);
 
@@ -108,8 +106,8 @@ fn plan(
                     },
                 );
             } else if let Some(previous) = previous {
-                // Conserva el registro mientras siga anclando el cooldown o
-                // el nivel siga cruzado; si no, se descarta (rearme total).
+                // Keep the record while it anchors cooldown or remains above a
+                // threshold; otherwise discard it for a full rearm.
                 if level > 0 || now - previous.notified_at < cooldown {
                     next.insert(key, previous);
                 }
@@ -160,7 +158,10 @@ fn send(alert: &Alert) {
     }
 }
 
-/// Punto de entrada: comparar el estado fresco con el persistido y notificar.
+/// [FLOW] NOTIFICATION ENTRY POINT
+///
+/// Compares fresh provider data with persisted state, sends planned alerts, and
+/// writes state only when the transition changed it.
 pub fn check(status: &Status) {
     let config = config::get();
     if !config.notifications {
@@ -224,7 +225,7 @@ mod tests {
         assert_eq!(alerts.len(), 1);
         assert!(!alerts[0].critical);
 
-        // segunda pasada con el mismo estado: silencio
+        // Same state on the next pass: stay silent.
         let (alerts, state2) = plan_at(&status(88.0, Some(100)), &state, 1060);
         assert!(alerts.is_empty());
         assert_eq!(state, state2);
@@ -241,13 +242,13 @@ mod tests {
     #[test]
     fn el_reset_de_la_ventana_respeta_el_cooldown() {
         let (_, state) = plan_at(&status(85.0, Some(100)), &State::new(), 1000);
-        // ventana rodante: resets_at cambia en cada consulta con consumo
-        // rápido — dentro del cooldown no se repite el mismo nivel…
+        // A rolling window changes `resets_at` on every fast-use read, so the
+        // same level remains silent during cooldown…
         let (alerts, state) = plan_at(&status(85.0, Some(200)), &state, 1060);
         assert!(alerts.is_empty());
         let (alerts, state) = plan_at(&status(85.0, Some(300)), &state, 1000 + COOLDOWN - 1);
         assert!(alerts.is_empty());
-        // …y pasado el cooldown, sí
+        // …then may notify once cooldown expires.
         let (alerts, _) = plan_at(&status(85.0, Some(400)), &state, 1000 + COOLDOWN);
         assert_eq!(alerts.len(), 1);
     }
@@ -257,11 +258,11 @@ mod tests {
         let (_, state) = plan_at(&status(85.0, Some(100)), &State::new(), 1000);
         let (alerts, state) = plan_at(&status(20.0, Some(100)), &state, 1060);
         assert!(alerts.is_empty());
-        // vuelve a cruzar enseguida: silencio (antes esto ametrallaba)
+        // Immediate recrossing stays silent; earlier behavior spammed alerts.
         let (alerts, state) = plan_at(&status(85.0, Some(100)), &state, 1120);
         assert!(alerts.is_empty());
-        // por debajo del umbral y con el cooldown vencido, el registro se
-        // descarta y el siguiente cruce notifica de inmediato
+        // Once usage is below threshold after cooldown, drop the record so the
+        // next crossing notifies immediately.
         let (alerts, state) = plan_at(&status(20.0, Some(100)), &state, 1000 + COOLDOWN);
         assert!(alerts.is_empty());
         assert!(state.is_empty());
