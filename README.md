@@ -5,9 +5,10 @@
 **AI subscription observability — live quotas, local token history, Waybar and an adaptive TUI**
   <br />
 
+[![Type](https://img.shields.io/badge/TYPE-OMARCHY_TOOL-0C0011?style=for-the-badge&logoColor=FFCA40)](https://github.com/samuhlo/lazysubs-eye)
 [![Release](https://img.shields.io/github/v/release/samuhlo/lazysubs-eye?style=for-the-badge&label=RELEASE&color=FFCA40)](https://github.com/samuhlo/lazysubs-eye/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/samuhlo/lazysubs-eye/ci.yml?style=for-the-badge&label=CI&logo=githubactions&logoColor=white)](https://github.com/samuhlo/lazysubs-eye/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/LICENSE-MIT-0C0011?style=for-the-badge)](LICENSE)
+[![License](https://img.shields.io/badge/LICENSE-MIT-737373?style=for-the-badge)](LICENSE)
 
   <br />
 </div>
@@ -27,22 +28,16 @@ and Hyprland setups.
 
 > _Quota data comes from each provider's official API. Token history is processed locally and never uploaded by lazysubs-eye._
 
-```text
- lazysubs-eye · cuotas de IA
-╭ ✳ Claude Code ─ pro ──────────────────────────────────────────────────────────╮
-│ [✓] 5h             73% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━      → 3h06m │
-│ [✓] semana         36% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━      → 5d21h │
-╰───────────────────────────────────────────────────────────────────────────────╯
-╭ ⬡ Codex ─ plus ───────────────────────────────────────────────────────────────╮
-│ [!] semana         80% ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━      → 5d23h │
-│ Créditos de reinicio disponibles: 4                                          │
-╰───────────────────────────────────────────────────────────────────────────────╯
-╭ ✳ tokens Claude · hoy ────────────────────────────────────────────────────────╮
-│ modelo                         in       out      cache→   cache+       total  │
-│ claude-fable-5                 17.7k    30.2k    777.9k   158.7k      984.5k  │
-╰───────────────────────────────────────────────────────────────────────────────╯
- q salir  r refrescar  o opciones  j/k scroll                         hace 59s
-```
+<div align="center">
+
+![lazysubs-eye TUI — live quotas and token usage](docs/img/tui-main.png)
+_Live quotas with reset countdowns, plus today's per-model token usage._
+
+| Combined spend graph | Live settings panel |
+| :---: | :---: |
+| ![Weekly token graph](docs/img/tui-chart.png) | ![Options panel](docs/img/tui-options.png) |
+
+</div>
 
 ---
 
